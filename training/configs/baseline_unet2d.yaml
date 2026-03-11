@@ -1,0 +1,66 @@
+# ============================================================
+# SynthRAD2025 Task 1 — Baseline 2D U-Net
+# Paths assume Nautilus NRP with PVC mounted at /pvc
+# ============================================================
+
+experiment:
+  name: "baseline_unet2d"
+  fold: 0
+  seed: 42
+
+# ── Data ────────────────────────────────────────────────────
+data:
+  # List all root dirs containing training cases.
+  # Center D is split into its own zip/dir due to license.
+  data_dirs:
+    - "/pvc/data/synthRAD2025_Task1_Train"
+    - "/pvc/data/synthRAD2025_Task1_Train_D"
+
+  folds_csv:  "/pvc/data/splits/folds.csv"
+  slice_axis: 0              # 0=axial
+  skip_empty_slices: true
+  empty_threshold: 0.01
+  num_workers: 4
+  pin_memory: true
+
+# ── Model ───────────────────────────────────────────────────
+model:
+  name: "unet2d"             # unet2d | attention_unet2d
+  in_channels: 1
+  out_channels: 1
+  base_features: 64
+  depth: 4                   # encoder stages → 64/128/256/512/1024
+  use_anatomy: true
+  n_anatomy: 3               # HN, TH, AB
+
+# ── Loss ────────────────────────────────────────────────────
+loss:
+  w_mae:  1.0
+  w_ssim: 1.0
+  w_gdl:  0.0
+  ms_ssim_levels: 5
+
+# ── Training ────────────────────────────────────────────────
+training:
+  epochs: 100
+  batch_size: 16
+  val_every_n_epochs: 5
+  save_every_n_epochs: 10
+
+# ── Optimiser ───────────────────────────────────────────────
+optimizer:
+  name: "adamw"
+  lr: 1.0e-4
+  weight_decay: 1.0e-5
+  betas: [0.9, 0.999]
+
+# ── Scheduler ───────────────────────────────────────────────
+scheduler:
+  name: "cosine"
+  T_max: 100
+  eta_min: 1.0e-6
+
+# ── Output ──────────────────────────────────────────────────
+output:
+  checkpoint_dir: "/pvc/checkpoints/baseline_unet2d"
+  save_best: true
