@@ -1,0 +1,46 @@
+# =============================================================================
+# SynthRAD2025 Task 1 — Training Image
+# Pushed to: ghcr.io/kagozi/synthrad2025-train:latest
+#
+# Build & push:
+#   docker build -t ghcr.io/kagozi/synthrad2025-train:latest \
+#       -f docker/Dockerfile.train .
+#   docker push ghcr.io/kagozi/synthrad2025-train:latest
+#
+# On Nautilus NRP (via K8s Job):
+#   kubectl apply -f nautilius/jobs/train-fold0.yaml
+# =============================================================================
+
+FROM pytorch/pytorch:2.1.0-cuda11.8-cudnn8-runtime
+
+LABEL org.opencontainers.image.description="SynthRAD2025 Task 1 training image"
+
+# ── System deps ────────────────────────────────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Python deps ────────────────────────────────────────────────────────────────
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# ── Copy project source ────────────────────────────────────────────────────────
+COPY src/       /app/src/
+COPY scripts/   /app/scripts/
+COPY training/  /app/training/
+COPY inference/ /app/inference/
+
+# ── Working directory ──────────────────────────────────────────────────────────
+WORKDIR /app
+
+# PVC is mounted at /pvc by the K8s job — data and outputs go there
+ENV PYTHONPATH="/app"
+ENV PYTHONUNBUFFERED=1
+
+# Default entrypoint runs the training script.
+# Override CMD in K8s job spec to pass different args.
+ENTRYPOINT ["python", "training/train.py"]
+CMD ["--config", "training/configs/baseline_unet2d.yaml", "--fold", "0"]
