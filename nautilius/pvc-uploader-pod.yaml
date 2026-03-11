@@ -1,0 +1,17 @@
+# nautilius/pvc-uploader-pod.yaml
+apiVersion: v1
+kind: Pod
+metadata:
+  name: synthrad2025-uploader
+spec:
+  containers:
+    - name: uploader
+      image: ubuntu:22.04
+      command: ["bash", "-lc", "sleep infinity"]
+      volumeMounts:
+        - name: synthrad2025-vol
+          mountPath: /pvc
+  volumes:
+    - name: synthrad2025-vol
+      persistentVolumeClaim:
+        claimName: synthrad2025-pvc

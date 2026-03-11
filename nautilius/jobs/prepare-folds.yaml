@@ -1,0 +1,44 @@
+# =============================================================================
+# One-time job: generate 5-fold CV splits on the PVC data
+# Run before any training jobs.
+#
+#   kubectl apply -f nautilius/jobs/prepare-folds.yaml
+#   kubectl logs -f job/synthrad2025-prepare-folds
+# =============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: synthrad2025-prepare-folds
+spec:
+  ttlSecondsAfterFinished: 3600    # auto-cleanup after 1 hour
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: prep
+          # ── EDIT: replace kagozi with your GitHub username ──────────
+          image: ghcr.io/kagozi/synthrad2025-train:latest
+          imagePullPolicy: Always
+          command: ["python", "scripts/prepare_folds.py"]
+          args:
+            - "--data_dirs"
+            - "/pvc/data/synthRAD2025_Task1_Train"
+            - "/pvc/data/synthRAD2025_Task1_Train_D"
+            - "--out_dir"
+            - "/pvc/data/splits"
+            - "--n_folds"
+            - "5"
+          resources:
+            requests:
+              memory: "8Gi"
+              cpu: "4"
+            limits:
+              memory: "16Gi"
+              cpu: "8"
+          volumeMounts:
+            - name: synthrad2025-vol
+              mountPath: /pvc
+      volumes:
+        - name: synthrad2025-vol
+          persistentVolumeClaim:
+            claimName: synthrad2025-pvc

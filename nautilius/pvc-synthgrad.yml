@@ -1,0 +1,12 @@
+# nautilius/pvc-synthgrad.yml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: synthrad2025-pvc
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 200Gi
+  storageClassName: rook-cephfs

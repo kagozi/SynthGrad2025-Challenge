@@ -1,0 +1,68 @@
+# =============================================================================
+# Training Job — Fold 0
+# Adjust fold number and experiment name for other folds.
+#
+#   kubectl apply -f nautilius/jobs/train-fold3.yaml
+#   kubectl logs -f job/synthrad2025-train-fold3
+# =============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: synthrad2025-train-fold3
+spec:
+  backoffLimit: 0              # don't retry on failure (fix the bug first)
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: trainer
+          # ── EDIT: replace kagozi with your GitHub username ──────────
+          image: ghcr.io/kagozi/synthrad2025-train:latest
+          imagePullPolicy: Always
+          command: ["python", "training/train.py"]
+          args:
+            - "--config"
+            - "training/configs/baseline_unet2d.yaml"
+            - "--fold"
+            - "3"
+            # Uncomment to resume:
+            # - "--resume"
+            # - "/pvc/checkpoints/baseline_unet2d/fold3_last.pth"
+
+          env:
+            - name: WANDB_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: wandb-secret
+                  key: api-key
+            - name: WANDB_PROJECT
+              value: "synthrad2025-task1"
+            # Optional: set your WandB username/team
+            # - name: WANDB_ENTITY
+            #   value: "your-wandb-username"
+
+          resources:
+            requests:
+              memory: "24Gi"
+              cpu: "8"
+              nvidia.com/gpu: "1"
+            limits:
+              memory: "32Gi"
+              cpu: "8"
+              nvidia.com/gpu: "1"
+
+          volumeMounts:
+            - name: synthrad2025-vol
+              mountPath: /pvc
+
+      volumes:
+        - name: synthrad2025-vol
+          persistentVolumeClaim:
+            claimName: synthrad2025-pvc
+
+      # Request a node with a GPU
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"
