@@ -22,8 +22,8 @@ spec:
           command: ["python", "scripts/prepare_folds.py"]
           args:
             - "--data_dirs"
-            - "/pvc/data/synthRAD2025_Task1_Train"
-            - "/pvc/data/synthRAD2025_Task1_Train_D"
+            - "/pvc/data/synthRAD2025_Task1_Train/Task1"
+            - "/pvc/data/synthRAD2025_Task1_Train_D/Task1"
             - "--out_dir"
             - "/pvc/data/splits"
             - "--n_folds"
