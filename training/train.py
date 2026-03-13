@@ -328,11 +328,13 @@ def train(cfg: dict, fold: int, resume: str = None):
             "Run: python scripts/prepare_folds.py"
         )
 
+    pad_to = tuple(dc["pad_to"]) if dc.get("pad_to") else None
     train_ds = SynthRAD2DDataset(
         case_list=case_list, fold_df=fold_df, fold=fold, split="train",
         slice_axis=dc["slice_axis"], augment=True,
         skip_empty_slices=dc["skip_empty_slices"],
         empty_threshold=dc["empty_threshold"],
+        pad_to=pad_to,
     )
     val_case_ids = set(fold_df[fold_df["fold"] == fold]["case_id"])
     val_cases    = [c for c in case_list if c["case_id"] in val_case_ids]
