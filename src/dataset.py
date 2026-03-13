@@ -99,11 +99,13 @@ class SynthRAD2DDataset(Dataset):
         augment: bool = True,
         skip_empty_slices: bool = True,
         empty_threshold: float = 0.01,  # min mask voxel fraction to keep slice
+        pad_to: Optional[Tuple[int, int]] = (512, 512),  # pad slices to fixed H×W
     ):
         self.slice_axis         = slice_axis
         self.augment            = augment and (split == "train")
         self.skip_empty         = skip_empty_slices
         self.empty_threshold    = empty_threshold
+        self.pad_to             = pad_to
 
         # Filter by fold
         if fold_df is not None and fold is not None:
@@ -160,6 +162,20 @@ class SynthRAD2DDataset(Dataset):
         else:
             return arr[:, :, s]
 
+    def _pad_slice(self, mr: np.ndarray, ct: np.ndarray, mask: np.ndarray):
+        """Pad H and W dimensions to self.pad_to with anatomy-appropriate fill."""
+        th, tw = self.pad_to
+        h,  w  = mr.shape
+        ph = max(0, th - h)
+        pw = max(0, tw - w)
+        if ph == 0 and pw == 0:
+            return mr, ct, mask
+        pad = ((0, ph), (0, pw))
+        mr   = np.pad(mr,   pad, mode="constant", constant_values=0.0)
+        ct   = np.pad(ct,   pad, mode="constant", constant_values=-1.0)  # air = -1000 HU
+        mask = np.pad(mask, pad, mode="constant", constant_values=0.0)
+        return mr, ct, mask
+
     def _augment(self, mr: np.ndarray, ct: np.ndarray, mask: np.ndarray):
         """Simple 2D augmentation applied identically to MR, CT, mask."""
         # Random horizontal flip
@@ -200,6 +216,9 @@ class SynthRAD2DDataset(Dataset):
         mr   = self._get_slice(mr_arr,   s)
         ct   = self._get_slice(ct_arr,   s)
         mask = self._get_slice(mask_arr, s)
+
+        if self.pad_to is not None:
+            mr, ct, mask = self._pad_slice(mr, ct, mask)
 
         if self.augment:
             mr, ct, mask = self._augment(mr, ct, mask)
