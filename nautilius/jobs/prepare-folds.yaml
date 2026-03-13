@@ -16,7 +16,6 @@ spec:
       restartPolicy: Never
       containers:
         - name: prep
-          # ── EDIT: replace kagozi with your GitHub username ──────────
           image: ghcr.io/kagozi/synthrad2025-train:latest
           imagePullPolicy: Always
           command: ["python", "scripts/prepare_folds.py"]
