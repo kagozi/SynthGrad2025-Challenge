@@ -24,6 +24,12 @@ spec:
                 operator: NotIn
                 values:
                 - k8s-chase-ci-10.calit2.optiputer.net
+                - k8s-haosu-02.sdsc.optiputer.net
+                - k8s-haosu-03.sdsc.optiputer.net
+              - key: nvidia.com/gpu.memory
+                operator: Gt
+                values:
+                - "15000"
       containers:
         - name: trainer
           # ── EDIT: replace kagozi with your GitHub username ──────────
