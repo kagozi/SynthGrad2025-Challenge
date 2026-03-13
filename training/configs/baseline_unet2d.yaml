@@ -18,7 +18,7 @@ data:
 
   folds_csv:  "/pvc/data/splits/folds.csv"
   slice_axis: 0              # 0=axial
-  pad_to: [512, 512]         # pad H×W to fixed size so batches can be stacked
+  pad_to: [608, 608]         # pad/crop H×W to fixed size (multiple of 32 for UNet)
   skip_empty_slices: true
   empty_threshold: 0.01
   num_workers: 4

@@ -163,17 +163,26 @@ class SynthRAD2DDataset(Dataset):
             return arr[:, :, s]
 
     def _pad_slice(self, mr: np.ndarray, ct: np.ndarray, mask: np.ndarray):
-        """Pad H and W dimensions to self.pad_to with anatomy-appropriate fill."""
+        """Center-crop and/or pad H×W to self.pad_to."""
         th, tw = self.pad_to
         h,  w  = mr.shape
-        ph = max(0, th - h)
-        pw = max(0, tw - w)
-        if ph == 0 and pw == 0:
-            return mr, ct, mask
-        pad = ((0, ph), (0, pw))
-        mr   = np.pad(mr,   pad, mode="constant", constant_values=0.0)
-        ct   = np.pad(ct,   pad, mode="constant", constant_values=-1.0)  # air = -1000 HU
-        mask = np.pad(mask, pad, mode="constant", constant_values=0.0)
+
+        # Center-crop if larger than target
+        if h > th:
+            start = (h - th) // 2
+            mr, ct, mask = mr[start:start+th, :], ct[start:start+th, :], mask[start:start+th, :]
+        if w > tw:
+            start = (w - tw) // 2
+            mr, ct, mask = mr[:, start:start+tw], ct[:, start:start+tw], mask[:, start:start+tw]
+
+        # Pad if smaller than target
+        h, w = mr.shape
+        ph, pw = max(0, th - h), max(0, tw - w)
+        if ph > 0 or pw > 0:
+            pad = ((0, ph), (0, pw))
+            mr   = np.pad(mr,   pad, mode="constant", constant_values=0.0)
+            ct   = np.pad(ct,   pad, mode="constant", constant_values=-1.0)
+            mask = np.pad(mask, pad, mode="constant", constant_values=0.0)
         return mr, ct, mask
 
     def _augment(self, mr: np.ndarray, ct: np.ndarray, mask: np.ndarray):
