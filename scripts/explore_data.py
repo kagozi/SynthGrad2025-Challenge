@@ -8,7 +8,7 @@ Scans data/raw/ and generates:
   - Summary CSV saved to data/splits/dataset_info.csv
 
 Usage:
-    python scripts/explore_data.py --data_dir data/raw
+    python scripts/explore_data.py --data_dir data
 """
 
 import argparse
