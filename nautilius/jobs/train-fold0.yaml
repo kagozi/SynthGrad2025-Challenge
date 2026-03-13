@@ -15,6 +15,15 @@ spec:
   template:
     spec:
       restartPolicy: Never
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: NotIn
+                values:
+                - k8s-chase-ci-10.calit2.optiputer.net
       containers:
         - name: trainer
           # ── EDIT: replace kagozi with your GitHub username ──────────
@@ -48,7 +57,7 @@ spec:
               cpu: "8"
               nvidia.com/gpu: "1"
             limits:
-              memory: "32Gi"
+              memory: "28Gi"
               cpu: "8"
               nvidia.com/gpu: "1"
 
