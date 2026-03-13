@@ -32,8 +32,8 @@ spec:
               memory: "8Gi"
               cpu: "4"
             limits:
-              memory: "16Gi"
-              cpu: "8"
+              memory: "9Gi"
+              cpu: "4800m"
           volumeMounts:
             - name: synthrad2025-vol
               mountPath: /pvc

@@ -13,8 +13,8 @@ data:
   # List all root dirs containing training cases.
   # Center D is split into its own zip/dir due to license.
   data_dirs:
-    - "/pvc/data/synthRAD2025_Task1_Train"
-    - "/pvc/data/synthRAD2025_Task1_Train_D"
+    - "/pvc/data/synthRAD2025_Task1_Train/Task1"
+    - "/pvc/data/synthRAD2025_Task1_Train_D/Task1"
 
   folds_csv:  "/pvc/data/splits/folds.csv"
   slice_axis: 0              # 0=axial
