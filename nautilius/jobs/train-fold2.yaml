@@ -53,22 +53,28 @@ spec:
 
           resources:
             requests:
-              memory: "24Gi"
+              memory: "27Gi"
               cpu: "8"
               nvidia.com/gpu: "1"
             limits:
-              memory: "28Gi"
+              memory: "32Gi"
               cpu: "8"
               nvidia.com/gpu: "1"
 
           volumeMounts:
             - name: synthrad2025-vol
               mountPath: /pvc
+            - name: dshm
+              mountPath: /dev/shm
 
       volumes:
         - name: synthrad2025-vol
           persistentVolumeClaim:
             claimName: synthrad2025-pvc
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
 
       # Request a node with a GPU
       tolerations:
