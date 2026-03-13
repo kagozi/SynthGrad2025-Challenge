@@ -6,7 +6,7 @@ Stratified by anatomy AND center to ensure balanced representation.
 Saves fold assignments to folds.csv
 
 Usage (local):
-    python scripts/prepare_folds.py --data_dirs data/raw --n_folds 5
+    python scripts/prepare_folds.py --data_dirs data --n_folds 5
 
 Usage (on PVC via kubectl exec or K8s job):
     python scripts/prepare_folds.py \
