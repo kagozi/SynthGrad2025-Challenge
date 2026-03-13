@@ -22,7 +22,6 @@ import numpy as np
 import pandas as pd
 from sklearn.model_selection import StratifiedKFold
 
-
 def parse_case_id(case_id: str) -> dict:
     m = re.match(r"(\d)(HN|TH|AB)([A-E])(\d+)", case_id, re.IGNORECASE)
     if not m:
