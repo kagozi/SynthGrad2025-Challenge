@@ -2,7 +2,7 @@
 """
 SynthRAD2025 Task 1 - Data Exploration Script
 
-Scans data/raw/ and generates:
+Scans data and generates:
   - Per-anatomy/center statistics (spacing, shape, HU range)
   - Intensity distribution plots
   - Summary CSV saved to data/splits/dataset_info.csv
