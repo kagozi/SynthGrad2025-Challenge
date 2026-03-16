@@ -29,7 +29,7 @@ spec:
               - key: nvidia.com/gpu.memory
                 operator: Gt
                 values:
-                - "15000"
+                - "29000"
       containers:
         - name: trainer
           # ── EDIT: replace kagozi with your GitHub username ──────────
@@ -53,6 +53,8 @@ spec:
                   key: api-key
             - name: WANDB_PROJECT
               value: "synthrad2025-task1"
+            - name: PYTORCH_ALLOC_CONF
+              value: "expandable_segments:True"
             # Optional: set your WandB username/team
             # - name: WANDB_ENTITY
             #   value: "your-wandb-username"
