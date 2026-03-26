@@ -1,0 +1,65 @@
+# =============================================================================
+# One-time job: deep data exploration — logs shapes, stats and sample images
+# to WandB for all cases in both PVC data directories.
+#
+#   kubectl apply -f nautilius/jobs/eda-wandb.yaml
+#   kubectl logs -f job/synthrad2025-eda-wandb
+# =============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: synthrad2025-eda-wandb
+spec:
+  ttlSecondsAfterFinished: 7200    # auto-cleanup after 2 hours
+  backoffLimit: 0
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: eda
+          image: ghcr.io/kagozi/synthrad2025-train:latest
+          imagePullPolicy: Always
+          command: ["python", "scripts/eda_wandb.py"]
+          args:
+            - "--data_dirs"
+            - "/pvc/data/synthRAD2025_Task1_Train/Task1"
+            - "/pvc/data/synthRAD2025_Task1_Train_D/Task1"
+            - "--out_dir"
+            - "/pvc/data/splits/eda"
+            - "--n_samples"
+            - "4"          # panels logged per anatomy (4 × 3 anatomies = 12 panels)
+            - "--wandb_project"
+            - "synthrad2025-task1"
+            # Uncomment to scope to your WandB team/entity:
+            # - "--wandb_entity"
+            # - "your-wandb-username"
+
+          env:
+            - name: WANDB_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: wandb-secret
+                  key: api-key
+            - name: WANDB_PROJECT
+              value: "synthrad2025-task1"
+            # Optional: set your WandB team
+            # - name: WANDB_ENTITY
+            #   value: "your-wandb-username"
+
+          resources:
+            requests:
+              memory: "24Gi"    # loading full volumes, ~578 cases
+              cpu: "8"
+            limits:
+              memory: "32Gi"
+              cpu: "8"
+              # No GPU needed for EDA
+
+          volumeMounts:
+            - name: synthrad2025-vol
+              mountPath: /pvc
+
+      volumes:
+        - name: synthrad2025-vol
+          persistentVolumeClaim:
+            claimName: synthrad2025-pvc

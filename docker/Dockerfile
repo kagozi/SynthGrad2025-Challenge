@@ -16,7 +16,7 @@
 
 FROM pytorch/pytorch:2.1.0-cuda11.8-cudnn8-runtime
 
-LABEL maintainer="your-email@example.com"
+LABEL maintainer="alex.kagozi@coyotes.usd.edu"
 LABEL description="SynthRAD2025 Task 1: MR → Synthetic CT"
 
 # ── System dependencies ────────────────────────────────────────────────────────
