@@ -46,7 +46,7 @@ from src.models.unet2d import UNet2D, AttentionUNet2D
 # ── Model loading ──────────────────────────────────────────────────────────────
 
 def load_model(checkpoint_path: str, device: torch.device):
-    ckpt = torch.load(checkpoint_path, map_location=device)
+    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=False)
     cfg  = ckpt["config"]
     mc   = cfg["model"]
 
