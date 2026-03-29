@@ -32,7 +32,7 @@ spec:
               - key: nvidia.com/gpu.memory
                 operator: Gt
                 values:
-                - "10000"
+                - "12000"   # excludes GTX 1080 Ti (11GB, sm_61 — incompatible with PyTorch build)
       containers:
         - name: infer
           image: ghcr.io/kagozi/synthrad2025-train:latest
@@ -41,7 +41,9 @@ spec:
           args:
             - |
               set -e
-              echo "=== Fold 1: Predict ===" && \
+              # Fix: PyTorch 2.6 changed weights_only default to True; patch load calls in-place
+              sed -i 's/torch.load(checkpoint_path, map_location=device)/torch.load(checkpoint_path, map_location=device, weights_only=False)/g' /app/inference/predict.py
+              echo "=== Fold 1: Predict (main) ===" && \
               python inference/predict.py \
                 --checkpoint /pvc/checkpoints/baseline_unet2d/fold1_best.pth \
                 --input_dir  /pvc/data/synthRAD2025_Task1_Train/Task1 \
