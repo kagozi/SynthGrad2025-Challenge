@@ -1,0 +1,80 @@
+# =============================================================================
+# Inference + Evaluation Job — Fold 1
+#
+#   kubectl apply -f nautilius/jobs/infer-fold1.yaml
+#   kubectl logs -f job/synthrad2025-infer-fold1
+#
+# Outputs:
+#   Predictions : /pvc/predictions/fold1_val/<case_id>/ct.mha
+#   Metrics CSV : /pvc/results/fold1_val_metrics.csv
+# =============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: synthrad2025-infer-fold1
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      restartPolicy: Never
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: NotIn
+                values:
+                - k8s-chase-ci-10.calit2.optiputer.net
+                - k8s-haosu-02.sdsc.optiputer.net
+                - k8s-haosu-03.sdsc.optiputer.net
+              - key: nvidia.com/gpu.memory
+                operator: Gt
+                values:
+                - "10000"
+      containers:
+        - name: infer
+          image: ghcr.io/kagozi/synthrad2025-train:latest
+          imagePullPolicy: Always
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -e
+              echo "=== Fold 1: Predict ===" && \
+              python inference/predict.py \
+                --checkpoint /pvc/checkpoints/baseline_unet2d/fold1_best.pth \
+                --input_dir  /pvc/data/synthRAD2025_Task1_Train/Task1 \
+                             /pvc/data/synthRAD2025_Task1_Train_D/Task1 \
+                --output_dir /pvc/predictions/fold1_val \
+                --split val \
+                --folds_csv  /pvc/data/splits/folds.csv \
+                --fold 1 \
+                --batch_size 16 && \
+              echo "=== Fold 1: Evaluate ===" && \
+              python inference/evaluate.py \
+                --pred_dir /pvc/predictions/fold1_val \
+                --gt_dir   /pvc/data/synthRAD2025_Task1_Train/Task1 \
+                --output   /pvc/results/fold1_val_metrics.csv \
+                --compute_seg \
+                --verbose
+          resources:
+            requests:
+              memory: "16Gi"
+              cpu: "4"
+              nvidia.com/gpu: "1"
+            limits:
+              memory: "24Gi"
+              cpu: "4"
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: synthrad2025-vol
+              mountPath: /pvc
+      volumes:
+        - name: synthrad2025-vol
+          persistentVolumeClaim:
+            claimName: synthrad2025-pvc
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"
