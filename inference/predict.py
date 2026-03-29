@@ -85,7 +85,7 @@ def predict_case(
     Returns predicted sCT volume in HU, same shape as input MR.
     """
     ds     = SynthRADInferenceDataset(case_path, anatomy)
-    loader = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=2)
+    loader = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=0)
 
     anatomy_idx = torch.tensor(
         [ANATOMY_TO_IDX[anatomy]], dtype=torch.long, device=device

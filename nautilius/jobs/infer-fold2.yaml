@@ -32,7 +32,7 @@ spec:
               - key: nvidia.com/gpu.memory
                 operator: Gt
                 values:
-                - "12000"   # excludes GTX 1080 Ti (11GB, sm_61 — incompatible with PyTorch build)
+                - "15000"   # requires Turing/Ampere+ (excludes Pascal sm_61 GPUs like GTX 1080 Ti)
       containers:
         - name: infer
           image: ghcr.io/kagozi/synthrad2025-train:latest
@@ -43,6 +43,7 @@ spec:
               set -e
               # Fix: PyTorch 2.6 changed weights_only default to True; patch load calls in-place
               sed -i 's/torch.load(checkpoint_path, map_location=device)/torch.load(checkpoint_path, map_location=device, weights_only=False)/g' /app/inference/predict.py
+              sed -i 's/num_workers=2/num_workers=0/g' /app/inference/predict.py
               echo "=== Fold 2: Predict ===" && \
               python inference/predict.py \
                 --checkpoint /pvc/checkpoints/baseline_unet2d/fold2_best.pth \
@@ -79,10 +80,16 @@ spec:
           volumeMounts:
             - name: synthrad2025-vol
               mountPath: /pvc
+            - name: dshm
+              mountPath: /dev/shm
       volumes:
         - name: synthrad2025-vol
           persistentVolumeClaim:
             claimName: synthrad2025-pvc
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 4Gi
       tolerations:
         - key: "nvidia.com/gpu"
           operator: "Exists"
