@@ -17,6 +17,7 @@ on:
       - "docker/Dockerfile.train"
       - "src/**"
       - "training/**"
+      - "inference/**"
       - "scripts/**"
       - "requirements.txt"
   workflow_dispatch:
