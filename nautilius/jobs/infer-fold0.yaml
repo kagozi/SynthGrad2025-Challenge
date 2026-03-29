@@ -45,7 +45,14 @@ spec:
               python inference/predict.py \
                 --checkpoint /pvc/checkpoints/baseline_unet2d/fold0_best.pth \
                 --input_dir  /pvc/data/synthRAD2025_Task1_Train/Task1 \
-                             /pvc/data/synthRAD2025_Task1_Train_D/Task1 \
+                --output_dir /pvc/predictions/fold0_val \
+                --split val \
+                --folds_csv  /pvc/data/splits/folds.csv \
+                --fold 0 \
+                --batch_size 16 && \
+              python inference/predict.py \
+                --checkpoint /pvc/checkpoints/baseline_unet2d/fold0_best.pth \
+                --input_dir  /pvc/data/synthRAD2025_Task1_Train_D/Task1 \
                 --output_dir /pvc/predictions/fold0_val \
                 --split val \
                 --folds_csv  /pvc/data/splits/folds.csv \
