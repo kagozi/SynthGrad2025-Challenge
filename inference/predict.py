@@ -130,12 +130,12 @@ def main(args):
 
     model = load_model(args.checkpoint, device)
 
-    input_dirs = args.input_dir   # now a list
+    input_dir  = Path(args.input_dir)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     # Build case list
-    all_cases = build_case_list(input_dirs)
+    all_cases = build_case_list(input_dir)
 
     # Filter by fold/split if requested
     if args.folds_csv and Path(args.folds_csv).exists() and args.fold is not None:
@@ -193,7 +193,7 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--checkpoint",  type=str, required=True)
-    parser.add_argument("--input_dir",   type=str, nargs="+", required=True)
+    parser.add_argument("--input_dir",   type=str, required=True)
     parser.add_argument("--output_dir",  type=str, required=True)
     parser.add_argument("--split",       type=str, default=None, choices=["train","val"])
     parser.add_argument("--folds_csv",   type=str, default=None)
