@@ -62,7 +62,7 @@ def main(args):
 
         # Find GT: try anatomy-grouped and flat layouts
         gt_case_dir = None
-        for pattern in [gt_dir / anatomy.replace("HN","1HN").replace("TH","1TH").replace("AB","1AB") / case_id,
+        for pattern in [gt_dir / anatomy / case_id,
                          gt_dir / case_id]:
             if pattern.exists():
                 gt_case_dir = pattern
