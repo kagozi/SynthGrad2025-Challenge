@@ -29,10 +29,10 @@ spec:
                 - k8s-chase-ci-10.calit2.optiputer.net
                 - k8s-haosu-02.sdsc.optiputer.net
                 - k8s-haosu-03.sdsc.optiputer.net
-              - key: nvidia.com/gpu.memory
+              - key: nvidia.com/gpu.compute.major
                 operator: Gt
                 values:
-                - "15000"   # requires Turing/Ampere+ (excludes Pascal sm_61 GPUs like GTX 1080 Ti)
+                - "7"       # requires sm_80+ (Ampere+): excludes V100 sm_70, GTX 1080 Ti sm_61
       containers:
         - name: infer
           image: ghcr.io/kagozi/synthrad2025-train:latest
@@ -44,6 +44,13 @@ spec:
               # Fix: PyTorch 2.6 changed weights_only default to True; patch load calls in-place
               sed -i 's/torch.load(checkpoint_path, map_location=device)/torch.load(checkpoint_path, map_location=device, weights_only=False)/g' /app/inference/predict.py
               sed -i 's/num_workers=2/num_workers=0/g' /app/inference/predict.py
+              python -c "
+import re, pathlib
+f = pathlib.Path('/app/inference/evaluate.py')
+txt = f.read_text()
+txt = re.sub(r'gt_dir / anatomy\.replace\(.*?\) / case_id', 'gt_dir / anatomy / case_id', txt)
+f.write_text(txt)
+"
               echo "=== Fold 2: Predict ===" && \
               python inference/predict.py \
                 --checkpoint /pvc/checkpoints/baseline_unet2d/fold2_best.pth \
