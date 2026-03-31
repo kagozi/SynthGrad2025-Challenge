@@ -226,8 +226,8 @@ def validate(
             continue
 
         # Reuse pre-built dataset — no NFS re-read
-        loader = DataLoader(ds, batch_size=32, shuffle=False, num_workers=0,
-                            pin_memory=True)
+        loader = DataLoader(ds, batch_size=8, shuffle=False, num_workers=0,
+                            pin_memory=False)
 
         anat_t  = torch.tensor([ANAT_IDX[anatomy]], dtype=torch.long, device=device)
         slices  = []
@@ -450,6 +450,7 @@ def train(cfg: dict, fold: int, resume: str = None):
 
         # ── Validation ─────────────────────────────────────────────────────────
         if (epoch + 1) % tc["val_every_n_epochs"] == 0 or epoch == tc["epochs"] - 1:
+            torch.cuda.empty_cache()
             val_results = validate(model, val_datasets, device, epoch)
             val_mae     = val_results.get("val/mae", float("inf"))
 
