@@ -374,13 +374,8 @@ def train(cfg: dict, fold: int, resume: str = None):
     print(f"[Train] Model: {cfg['model']['name']} ({n_params:.1f}M params)")
     wandb.config.update({"model_params_M": round(n_params, 1)})
 
-    # torch.compile gives ~15-30% throughput improvement on PyTorch 2.x (Ampere+)
-    if hasattr(torch, "compile") and device.type == "cuda":
-        try:
-            model = torch.compile(model)
-            print("[Train] torch.compile: enabled")
-        except Exception as e:
-            print(f"[Train] torch.compile skipped: {e}")
+    # torch.compile requires a C compiler (Triton) in the container.
+    # Skipped here — AMP + CaseGroupedSampler already give the major speedup.
 
     optimizer = build_optimizer(model, cfg)
     scheduler = build_scheduler(optimizer, cfg)
@@ -395,7 +390,8 @@ def train(cfg: dict, fold: int, resume: str = None):
     )
 
     # AMP scaler — fp16 forward/backward; ~2-3x speedup on Ampere GPUs
-    scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
+    _GradScaler = getattr(torch.amp, "GradScaler", torch.cuda.amp.GradScaler)
+    scaler = _GradScaler("cuda", enabled=(device.type == "cuda"))
 
     start_epoch = 0
     best_mae    = float("inf")
@@ -422,7 +418,7 @@ def train(cfg: dict, fold: int, resume: str = None):
             ai   = batch["anatomy_idx"].to(device, non_blocking=True)
 
             optimizer.zero_grad(set_to_none=True)
-            with torch.cuda.amp.autocast(enabled=(device.type == "cuda")):
+            with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
                 pred   = model(mr, ai)
                 losses = criterion(pred, ct, mask)
 
