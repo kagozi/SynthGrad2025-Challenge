@@ -30,3 +30,4 @@ wandb/
 # Large data archives
 data/*.zip
 paper
+*.gz

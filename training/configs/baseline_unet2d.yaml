@@ -21,7 +21,7 @@ data:
   pad_to: [512, 512]         # pad/crop H×W to fixed size (multiple of 32 for UNet)
   skip_empty_slices: true
   empty_threshold: 0.01
-  num_workers: 4
+  num_workers: 8
   pin_memory: true
 
 # ── Model ───────────────────────────────────────────────────
@@ -44,7 +44,7 @@ loss:
 # ── Training ────────────────────────────────────────────────
 training:
   epochs: 100
-  batch_size: 4
+  batch_size: 32         # safe with AMP on 16GB GPU (~8.7 GB peak); was 4 without AMP
   val_every_n_epochs: 5
   save_every_n_epochs: 10
 

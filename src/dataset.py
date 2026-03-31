@@ -11,14 +11,21 @@ Supports:
 from __future__ import annotations
 
 import random
+from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterator, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 import SimpleITK as sitk
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Sampler
+
+# ── Per-worker volume cache ─────────────────────────────────────────────────────
+# Module-level dict lives in each worker process independently.
+# Stores the most-recently-loaded case's volumes to avoid re-reading from NFS
+# when consecutive slice indices belong to the same case (see CaseGroupedSampler).
+_worker_cache: Dict[int, Tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
 
 
 # ── I/O helpers ────────────────────────────────────────────────────────────────
@@ -213,14 +220,23 @@ class SynthRAD2DDataset(Dataset):
         anatomy  = case["anatomy"]
         path     = Path(case["path"])
 
-        mr_arr   = load_mha(path / "mr.mha")
-        ct_arr   = load_mha(path / "ct.mha")
-        mask_arr = load_mha(path / "mask.mha") if (path / "mask.mha").exists() \
-                   else np.ones_like(mr_arr)
+        # ── Per-worker volume cache ──────────────────────────────────────────
+        # Only evict when switching to a different case. With CaseGroupedSampler
+        # all slices of one case arrive consecutively, so this achieves a 1-read
+        # per case per epoch regardless of num_workers.
+        if c_idx not in _worker_cache:
+            _worker_cache.clear()   # evict previous case to bound memory use
+            mr_raw   = load_mha(path / "mr.mha")
+            ct_raw   = load_mha(path / "ct.mha")
+            mask_raw = load_mha(path / "mask.mha") if (path / "mask.mha").exists() \
+                       else np.ones_like(mr_raw)
+            _worker_cache[c_idx] = (
+                normalise_mr(mr_raw, anatomy),
+                normalise_ct(ct_raw),
+                (mask_raw > 0).astype(np.float32),
+            )
 
-        mr_arr   = normalise_mr(mr_arr, anatomy)
-        ct_arr   = normalise_ct(ct_arr)
-        mask_arr = (mask_arr > 0).astype(np.float32)
+        mr_arr, ct_arr, mask_arr = _worker_cache[c_idx]
 
         mr   = self._get_slice(mr_arr,   s)
         ct   = self._get_slice(ct_arr,   s)
@@ -240,6 +256,45 @@ class SynthRAD2DDataset(Dataset):
             "case_id":     case["case_id"],
             "slice_idx":   s,
         }
+
+
+# ── Case-grouped sampler ───────────────────────────────────────────────────────
+
+class CaseGroupedSampler(Sampler):
+    """
+    Yields slice indices grouped by case so that all slices of one case arrive
+    consecutively. Combined with the per-worker volume cache this means each
+    3D volume is read from disk exactly once per epoch instead of once per slice.
+
+    Cases are shuffled each epoch; slices within a case are also shuffled.
+    """
+
+    def __init__(self, dataset: SynthRAD2DDataset, shuffle: bool = True):
+        self.shuffle = shuffle
+        # Group flat dataset indices by case index
+        groups: Dict[int, List[int]] = defaultdict(list)
+        for flat_idx, (c_idx, _) in enumerate(dataset.index):
+            groups[c_idx].append(flat_idx)
+        self.groups: List[List[int]] = list(groups.values())
+        self.total = sum(len(g) for g in self.groups)
+
+    def __iter__(self) -> Iterator[int]:
+        if self.shuffle:
+            case_order = torch.randperm(len(self.groups)).tolist()
+        else:
+            case_order = list(range(len(self.groups)))
+
+        for ci in case_order:
+            g = self.groups[ci]
+            if self.shuffle:
+                perm = torch.randperm(len(g)).tolist()
+                for i in perm:
+                    yield g[i]
+            else:
+                yield from g
+
+    def __len__(self) -> int:
+        return self.total
 
 
 # ── 3D Patch Dataset ───────────────────────────────────────────────────────────

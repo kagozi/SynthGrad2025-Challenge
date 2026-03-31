@@ -1,0 +1,29 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: synthrad2025-aggregate-metrics
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 3600
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: agg
+          image: python:3.11-slim
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              pip install pandas -q
+              python3 /pvc/agg_metrics.py
+          volumeMounts:
+            - name: synthrad2025-vol
+              mountPath: /pvc
+      volumes:
+        - name: synthrad2025-vol
+          persistentVolumeClaim:
+            claimName: synthrad2025-pvc
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"
