@@ -386,8 +386,12 @@ def train(cfg: dict, fold: int, resume: str = None):
     scheduler = build_scheduler(optimizer, cfg)
     lc        = cfg["loss"]
     criterion = CombinedLoss(
-        w_mae=lc["w_mae"], w_ssim=lc["w_ssim"],
-        w_gdl=lc["w_gdl"], ms_ssim_levels=lc["ms_ssim_levels"],
+        w_mae          = lc["w_mae"],
+        w_ssim         = lc["w_ssim"],
+        w_gdl          = lc["w_gdl"],
+        ms_ssim_levels = lc["ms_ssim_levels"],
+        bone_weight    = lc.get("bone_weight",    1.0),
+        bone_threshold = lc.get("bone_threshold", -0.4),
     )
 
     # AMP scaler — fp16 forward/backward; ~2-3x speedup on Ampere GPUs

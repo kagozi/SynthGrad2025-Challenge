@@ -1,0 +1,86 @@
+# =============================================================================
+# Round 2 Training Job — Fold 3
+# GDL + Bone-weighted MAE + AMP + CaseGroupedSampler
+#
+#   kubectl apply -f nautilius/jobs/train-round2-fold3.yaml
+#   kubectl logs -f job/synthrad2025-train-r2-fold3
+# =============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: synthrad2025-train-r2-fold3
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      restartPolicy: Never
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: NotIn
+                values:
+                - k8s-chase-ci-10.calit2.optiputer.net
+                - k8s-haosu-02.sdsc.optiputer.net
+                - k8s-haosu-03.sdsc.optiputer.net
+              - key: nvidia.com/gpu.compute.major
+                operator: Gt
+                values:
+                - "7"
+      containers:
+        - name: trainer
+          image: ghcr.io/kagozi/synthrad2025-train:latest
+          imagePullPolicy: Always
+          command: ["python", "training/train.py"]
+          args:
+            - "--config"
+            - "training/configs/round2_unet2d.yaml"
+            - "--fold"
+            - "3"
+            # Uncomment to resume:
+            # - "--resume"
+            # - "/pvc/checkpoints/round2_unet2d/fold3_last.pth"
+
+          env:
+            - name: WANDB_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: wandb-secret
+                  key: api-key
+            - name: WANDB_PROJECT
+              value: "synthrad2025-task1"
+            - name: PYTORCH_ALLOC_CONF
+              value: "expandable_segments:True"
+
+          resources:
+            requests:
+              memory: "27Gi"
+              cpu: "8"
+              nvidia.com/gpu: "1"
+            limits:
+              memory: "32Gi"
+              cpu: "8"
+              nvidia.com/gpu: "1"
+
+          volumeMounts:
+            - name: synthrad2025-vol
+              mountPath: /pvc
+            - name: dshm
+              mountPath: /dev/shm
+
+      volumes:
+        - name: synthrad2025-vol
+          persistentVolumeClaim:
+            claimName: synthrad2025-pvc
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"
