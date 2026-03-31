@@ -39,6 +39,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from src.dataset import (
     SynthRAD2DDataset,
     SynthRADInferenceDataset,
+    CaseGroupedSampler,
     build_case_list,
     denormalise_ct,
 )
@@ -56,8 +57,10 @@ def seed_everything(seed: int):
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark     = False
+    # benchmark=True lets cuDNN auto-tune kernels for the fixed input size —
+    # measurably faster with negligible non-determinism impact.
+    torch.backends.cudnn.benchmark     = True
+    torch.backends.cudnn.deterministic = False
 
 
 # ── Config ─────────────────────────────────────────────────────────────────────
@@ -204,7 +207,7 @@ def log_sample_images(
 @torch.no_grad()
 def validate(
     model: nn.Module,
-    val_cases: list,
+    val_datasets: list,   # list of (case_meta, SynthRADInferenceDataset)
     device: torch.device,
     epoch: int,
 ) -> dict:
@@ -215,15 +218,15 @@ def validate(
     all_metrics   = []
     sample_volumes = {}   # one case per anatomy for image logging
 
-    for case in tqdm(val_cases, desc="  Validating", leave=False):
+    for case, ds in tqdm(val_datasets, desc="  Validating", leave=False):
         anatomy = case["anatomy"]
         path    = Path(case["path"])
         ct_path = path / "ct.mha"
         if not ct_path.exists():
             continue
 
-        ds     = SynthRADInferenceDataset(path, anatomy)
-        loader = DataLoader(ds, batch_size=4, shuffle=False, num_workers=2,
+        # Reuse pre-built dataset — no NFS re-read
+        loader = DataLoader(ds, batch_size=32, shuffle=False, num_workers=0,
                             pin_memory=True)
 
         anat_t  = torch.tensor([ANAT_IDX[anatomy]], dtype=torch.long, device=device)
@@ -340,17 +343,30 @@ def train(cfg: dict, fold: int, resume: str = None):
     val_cases    = [c for c in case_list if c["case_id"] in val_case_ids]
 
     tc = cfg["training"]
+    # CaseGroupedSampler: ensures all slices of a case arrive consecutively so
+    # the per-worker NFS cache serves each volume with a single disk read per epoch.
+    sampler = CaseGroupedSampler(train_ds, shuffle=True)
     train_loader = DataLoader(
         train_ds,
         batch_size=tc["batch_size"],
-        shuffle=True,
+        sampler=sampler,
         num_workers=dc["num_workers"],
         pin_memory=dc["pin_memory"],
         drop_last=True,
+        persistent_workers=(dc["num_workers"] > 0),
     )
 
-    print(f"[Train] Train slices: {len(train_ds)}  |  Val cases: {len(val_cases)}")
-    wandb.config.update({"train_slices": len(train_ds), "val_cases": len(val_cases)})
+    # Pre-build val datasets once — avoids re-reading volumes from NFS every val run
+    print("[Train] Pre-loading validation datasets...")
+    val_datasets = []
+    for case in tqdm(val_cases, desc="  Loading val", leave=False):
+        path = Path(case["path"])
+        if not (path / "ct.mha").exists():
+            continue
+        ds = SynthRADInferenceDataset(path, case["anatomy"])
+        val_datasets.append((case, ds))
+    print(f"[Train] Train slices: {len(train_ds)}  |  Val cases: {len(val_datasets)}")
+    wandb.config.update({"train_slices": len(train_ds), "val_cases": len(val_datasets)})
 
     # ── Model ──────────────────────────────────────────────────────────────────
     model    = build_model(cfg).to(device)
@@ -358,13 +374,28 @@ def train(cfg: dict, fold: int, resume: str = None):
     print(f"[Train] Model: {cfg['model']['name']} ({n_params:.1f}M params)")
     wandb.config.update({"model_params_M": round(n_params, 1)})
 
+    # torch.compile gives ~15-30% throughput improvement on PyTorch 2.x (Ampere+)
+    if hasattr(torch, "compile") and device.type == "cuda":
+        try:
+            model = torch.compile(model)
+            print("[Train] torch.compile: enabled")
+        except Exception as e:
+            print(f"[Train] torch.compile skipped: {e}")
+
     optimizer = build_optimizer(model, cfg)
     scheduler = build_scheduler(optimizer, cfg)
     lc        = cfg["loss"]
     criterion = CombinedLoss(
-        w_mae=lc["w_mae"], w_ssim=lc["w_ssim"],
-        w_gdl=lc["w_gdl"], ms_ssim_levels=lc["ms_ssim_levels"],
+        w_mae          = lc["w_mae"],
+        w_ssim         = lc["w_ssim"],
+        w_gdl          = lc["w_gdl"],
+        ms_ssim_levels = lc["ms_ssim_levels"],
+        bone_weight    = lc.get("bone_weight",    1.0),
+        bone_threshold = lc.get("bone_threshold", -0.4),
     )
+
+    # AMP scaler — fp16 forward/backward; ~2-3x speedup on Ampere GPUs
+    scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
 
     start_epoch = 0
     best_mae    = float("inf")
@@ -390,13 +421,16 @@ def train(cfg: dict, fold: int, resume: str = None):
             mask = batch["mask"].to(device, non_blocking=True)
             ai   = batch["anatomy_idx"].to(device, non_blocking=True)
 
-            pred   = model(mr, ai)
-            losses = criterion(pred, ct, mask)
-
             optimizer.zero_grad(set_to_none=True)
-            losses["total"].backward()
+            with torch.cuda.amp.autocast(enabled=(device.type == "cuda")):
+                pred   = model(mr, ai)
+                losses = criterion(pred, ct, mask)
+
+            scaler.scale(losses["total"]).backward()
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
 
             for k in ["total", "mae", "ssim"]:
                 if k in losses:
@@ -420,7 +454,7 @@ def train(cfg: dict, fold: int, resume: str = None):
 
         # ── Validation ─────────────────────────────────────────────────────────
         if (epoch + 1) % tc["val_every_n_epochs"] == 0 or epoch == tc["epochs"] - 1:
-            val_results = validate(model, val_cases, device, epoch)
+            val_results = validate(model, val_datasets, device, epoch)
             val_mae     = val_results.get("val/mae", float("inf"))
 
             if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):

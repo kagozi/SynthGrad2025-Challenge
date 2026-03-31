@@ -119,7 +119,18 @@ class MSSSIMLoss(nn.Module):
 # ── MAE ────────────────────────────────────────────────────────────────────────
 
 class MAELoss(nn.Module):
-    """L1 loss optionally restricted to body mask region."""
+    """
+    L1 loss optionally restricted to body mask with bone-region upweighting.
+
+    bone_weight    : extra multiplier on bone voxels (1.0 = disabled)
+    bone_threshold : CT value in normalised [-1,1] space above which a voxel is
+                     considered bone.  HU 200 maps to -0.4 with our clip [-1000,3000].
+    """
+
+    def __init__(self, bone_weight: float = 1.0, bone_threshold: float = -0.4):
+        super().__init__()
+        self.bone_weight    = bone_weight
+        self.bone_threshold = bone_threshold
 
     def forward(
         self,
@@ -128,9 +139,21 @@ class MAELoss(nn.Module):
         mask: torch.Tensor = None,
     ) -> torch.Tensor:
         diff = torch.abs(pred - target)
+
+        # Build per-voxel weight map: bone voxels get extra emphasis
+        if self.bone_weight > 1.0:
+            bone_region = (target > self.bone_threshold).float()
+            w = 1.0 + (self.bone_weight - 1.0) * bone_region   # (B,1,H,W)
+            diff = diff * w
+
         if mask is not None:
             diff = diff * mask
-            return diff.sum() / (mask.sum() + 1e-8)
+            if self.bone_weight > 1.0:
+                denom = (mask * w).sum() + 1e-8
+            else:
+                denom = mask.sum() + 1e-8
+            return diff.sum() / denom
+
         return diff.mean()
 
 
@@ -173,25 +196,29 @@ class GradientDifferenceLoss(nn.Module):
 
 class CombinedLoss(nn.Module):
     """
-    Default training loss:
-        L = w_mae * MAE + w_ssim * (1 - MS-SSIM) + w_gdl * GDL
+    Training loss:
+        L = w_mae * BoneWeightedMAE + w_ssim * (1 - MS-SSIM) + w_gdl * GDL
 
-    Recommended starting weights: mae=1.0, ssim=1.0, gdl=0.5
+    All terms are restricted to the body mask when mask is provided.
+    bone_weight > 1.0 upweights voxels above bone_threshold in normalised CT space
+    (HU 200 ≈ -0.4 with our [-1000, 3000] clip).
     """
 
     def __init__(
         self,
-        w_mae:  float = 1.0,
-        w_ssim: float = 1.0,
-        w_gdl:  float = 0.0,
-        ms_ssim_levels: int = 5,
+        w_mae:          float = 1.0,
+        w_ssim:         float = 1.0,
+        w_gdl:          float = 0.0,
+        ms_ssim_levels: int   = 5,
+        bone_weight:    float = 1.0,
+        bone_threshold: float = -0.4,
     ):
         super().__init__()
         self.w_mae  = w_mae
         self.w_ssim = w_ssim
         self.w_gdl  = w_gdl
 
-        self.mae_loss  = MAELoss()
+        self.mae_loss  = MAELoss(bone_weight=bone_weight, bone_threshold=bone_threshold)
         self.ssim_loss = MSSSIMLoss(levels=ms_ssim_levels)
         self.gdl_loss  = GradientDifferenceLoss()
 

@@ -1,24 +1,27 @@
 # ============================================================
-# SynthRAD2025 Task 1 — Baseline 2D U-Net
-# Paths assume Nautilus NRP with PVC mounted at /pvc
+# SynthRAD2025 Task 1 — Round 2: Improved Loss
+#
+# Changes vs baseline_unet2d.yaml:
+#   - GDL enabled (w_gdl: 0.5)  → sharper bone/soft-tissue edges
+#   - Bone-weighted MAE (2.5×)  → directly targets HD95 / bone dice
+#   - batch_size: 32            → safe with AMP on 16GB+
+#   - num_workers: 8
 # ============================================================
 
 experiment:
-  name: "baseline_unet2d"
+  name: "round2_unet2d"
   fold: 0
   seed: 42
 
 # ── Data ────────────────────────────────────────────────────
 data:
-  # List all root dirs containing training cases.
-  # Center D is split into its own zip/dir due to license.
   data_dirs:
     - "/pvc/data/synthRAD2025_Task1_Train/Task1"
     - "/pvc/data/synthRAD2025_Task1_Train_D/Task1"
 
   folds_csv:  "/pvc/data/splits/folds.csv"
-  slice_axis: 0              # 0=axial
-  pad_to: [512, 512]         # pad/crop H×W to fixed size (multiple of 32 for UNet)
+  slice_axis: 0
+  pad_to: [512, 512]
   skip_empty_slices: true
   empty_threshold: 0.01
   num_workers: 8
@@ -26,25 +29,27 @@ data:
 
 # ── Model ───────────────────────────────────────────────────
 model:
-  name: "unet2d"             # unet2d | attention_unet2d
+  name: "attention_unet2d"
   in_channels: 1
   out_channels: 1
   base_features: 64
-  depth: 4                   # encoder stages → 64/128/256/512/1024
+  depth: 4
   use_anatomy: true
-  n_anatomy: 3               # HN, TH, AB
+  n_anatomy: 3
 
 # ── Loss ────────────────────────────────────────────────────
 loss:
   w_mae:  1.0
   w_ssim: 1.0
-  w_gdl:  0.0
+  w_gdl:  0.5            # gradient difference loss — sharpens bone boundaries
   ms_ssim_levels: 5
+  bone_weight:    2.5    # 2.5× weight on voxels where HU > 200 (bone)
+  bone_threshold: -0.4   # normalised [-1,1] equivalent of HU 200
 
 # ── Training ────────────────────────────────────────────────
 training:
   epochs: 100
-  batch_size: 32         # safe with AMP on 16GB GPU (~8.7 GB peak); was 4 without AMP
+  batch_size: 32         # safe with AMP on 16GB GPU (~8.7 GB peak)
   val_every_n_epochs: 5
   save_every_n_epochs: 10
 
@@ -63,5 +68,5 @@ scheduler:
 
 # ── Output ──────────────────────────────────────────────────
 output:
-  checkpoint_dir: "/pvc/checkpoints/baseline_unet2d"
+  checkpoint_dir: "/pvc/checkpoints/round2_unet2d"
   save_best: true

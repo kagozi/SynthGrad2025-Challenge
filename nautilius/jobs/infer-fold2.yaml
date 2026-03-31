@@ -44,13 +44,7 @@ spec:
               # Fix: PyTorch 2.6 changed weights_only default to True; patch load calls in-place
               sed -i 's/torch.load(checkpoint_path, map_location=device)/torch.load(checkpoint_path, map_location=device, weights_only=False)/g' /app/inference/predict.py
               sed -i 's/num_workers=2/num_workers=0/g' /app/inference/predict.py
-              python -c "
-import re, pathlib
-f = pathlib.Path('/app/inference/evaluate.py')
-txt = f.read_text()
-txt = re.sub(r'gt_dir / anatomy\.replace\(.*?\) / case_id', 'gt_dir / anatomy / case_id', txt)
-f.write_text(txt)
-"
+              python -c "import re,pathlib; f=pathlib.Path('/app/inference/evaluate.py'); s=f.read_text(); s=re.sub('gt_dir / anatomy\\.replace\\(.*?\\) / case_id','gt_dir / anatomy / case_id',s); f.write_text(s)"
               echo "=== Fold 2: Predict ===" && \
               python inference/predict.py \
                 --checkpoint /pvc/checkpoints/baseline_unet2d/fold2_best.pth \

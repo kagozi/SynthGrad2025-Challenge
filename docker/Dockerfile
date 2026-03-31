@@ -1,55 +1,54 @@
 # =============================================================================
 # SynthRAD2025 Task 1 — Grand Challenge Docker Submission
 #
-# Target: AWS g4dn.2xlarge (1x NVIDIA T4 16GB, 8 vCPU, 32GB RAM)
-# Constraint: 15 min inference per patient
+# Follows the official algorithm-template structure:
+#   https://github.com/SynthRAD2025/algorithm-template
 #
-# Build:
-#   docker build -t synthrad2025_task1 -f docker/Dockerfile .
+# Target: AWS g4dn.2xlarge (NVIDIA T4 16GB, 8 vCPU, 32GB RAM)
+# I/O:
+#   Input MR   : /input/images/mri/<uuid>.mha
+#   Input mask : /input/images/body/<uuid>.mha
+#   Region     : /input/region.json
+#   Output sCT : /output/images/synthetic-ct/<uuid>.mha
 #
-# Test locally:
-#   docker run --gpus all \
-#     -v /path/to/input:/input \
-#     -v /path/to/output:/output \
-#     synthrad2025_task1
+# Build (from repo root):
+#   docker build -t synthrad_algorithm -f docker/Dockerfile .
+#
+# Export:
+#   docker/export.sh
 # =============================================================================
 
 FROM pytorch/pytorch:2.1.0-cuda11.8-cudnn8-runtime
 
-LABEL maintainer="alex.kagozi@coyotes.usd.edu"
-LABEL description="SynthRAD2025 Task 1: MR → Synthetic CT"
+ENV TASK_TYPE=mri
+ENV EXECUTE_IN_DOCKER=1
 
-# ── System dependencies ────────────────────────────────────────────────────────
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgomp1 \
-    && rm -rf /var/lib/apt/lists/*
+# ── Non-root user (required by Grand Challenge) ────────────────────────────
+RUN groupadd -r algorithm && useradd -m --no-log-init -r -g algorithm algorithm
 
-# ── Python dependencies ────────────────────────────────────────────────────────
+RUN mkdir -p /opt/app /input /output \
+    && chown algorithm:algorithm /opt/app /input /output
+
+USER algorithm
+
 WORKDIR /opt/app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir \
-    SimpleITK>=2.3.0 \
-    numpy>=1.24.0 \
-    pandas>=2.0.0 \
-    pyyaml>=6.0 \
-    tqdm>=4.65.0
+ENV PATH="/home/algorithm/.local/bin:${PATH}"
 
-# ── Copy project source ────────────────────────────────────────────────────────
-COPY src/ /opt/app/src/
-COPY docker/process.py /opt/app/process.py
+RUN python -m pip install --user -U pip
 
-# ── Copy trained model checkpoint ─────────────────────────────────────────────
-# Replace with your actual checkpoint path before building
-COPY checkpoints/best_model.pth /opt/app/model.pth
+# ── Python dependencies ────────────────────────────────────────────────────
+COPY --chown=algorithm:algorithm docker/requirements.txt /opt/app/
+RUN python -m pip install --user -r requirements.txt
 
-# ── Grand Challenge I/O convention ─────────────────────────────────────────────
-# Input:  /input/<case_id>/mr.mha  (and mask.mha if available)
-# Output: /output/<case_id>/ct.mha (predicted sCT)
+# ── Template base class + entrypoint ──────────────────────────────────────
+COPY --chown=algorithm:algorithm docker/.env           /opt/app/
+COPY --chown=algorithm:algorithm docker/base_algorithm.py /opt/app/
+COPY --chown=algorithm:algorithm docker/process.py     /opt/app/
 
-ENV INPUT_DIR="/input"
-ENV OUTPUT_DIR="/output"
-ENV MODEL_PATH="/opt/app/model.pth"
+# ── Project source ─────────────────────────────────────────────────────────
+COPY --chown=algorithm:algorithm src/ /opt/app/src/
 
-# ── Entrypoint ─────────────────────────────────────────────────────────────────
-ENTRYPOINT ["python", "/opt/app/process.py"]
+# Model weights are uploaded separately and extracted to /opt/ml/model/ at runtime
+
+ENTRYPOINT python -m process $0 $@

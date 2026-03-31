@@ -30,7 +30,14 @@ SynthGrad2025-Challenge/
 │   └── evaluate.py         # Local metric computation
 ├── docker/
 │   ├── Dockerfile          # Grand Challenge submission container
-│   └── process.py          # Docker entrypoint (GC I/O convention)
+│   ├── process.py          # Docker entrypoint (GC I/O convention)
+│   ├── base_algorithm.py   # BaseSynthradAlgorithm (official template)
+│   ├── requirements.txt    # Trimmed submission deps (no training extras)
+│   ├── .env                # TASK_TYPE=mri
+│   ├── build.sh            # Build linux/amd64 image from repo root
+│   └── export.sh           # Build + save as .tar.gz for GC upload
+├── results/                # Per-fold val metrics CSVs (local CV)
+├── checkpoints/            # best_model.pth (gitignored)
 └── requirements.txt
 ```
 
@@ -118,19 +125,28 @@ python inference/evaluate.py \
 
 ### 8. Build Docker for submission
 
+Follows the [official SynthRAD2025 algorithm template](https://github.com/SynthRAD2025/algorithm-template).
+
 ```bash
-# Copy best checkpoint
-cp checkpoints/baseline_unet2d/fold0_best.pth checkpoints/best_model.pth
+# Copy best checkpoint locally (pulled from PVC)
+# checkpoints/best_model.pth  ← gitignored, must be present
 
-# Build image
-docker build -t synthrad2025_task1 -f docker/Dockerfile .
+# Build linux/amd64 image (from repo root)
+docker/build.sh
 
-# Test locally
-docker run --gpus all \
-    -v $(pwd)/data/raw/1HNA001:/input/1HNA001 \
-    -v $(pwd)/test_output:/output \
-    synthrad2025_task1
+# Export as .tar.gz for Grand Challenge upload
+docker/export.sh synthrad2025_task1_baseline
+
+# Create model tarball (uploaded separately on Grand Challenge)
+tar -czvf model.tar.gz -C checkpoints .
 ```
+
+Grand Challenge I/O (handled by `base_algorithm.py`):
+- Input MR:   `/input/images/mri/<uuid>.mha`
+- Body mask:  `/input/images/body/<uuid>.mha`
+- Region:     `/input/region.json`
+- Output sCT: `/output/images/synthetic-ct/<uuid>.mha`
+- Model:      `/opt/ml/model/model.pth` (from uploaded tarball)
 
 ## Evaluation Metrics
 
@@ -145,6 +161,17 @@ docker run --gpus all \
 Official evaluation uses TotalSegmentator for mDice/HD95.
 Local evaluation uses HU thresholds as a fast proxy.
 
+## Baseline CV Results (5-fold, 513 val cases)
+
+| Anatomy | MAE (HU↓) | PSNR (dB↑) | MS-SSIM↑ | mDice↑ | HD95 (mm↓) |
+|---------|-----------|------------|----------|--------|------------|
+| AB | 102.1 | 25.71 | 0.681 | 0.537 | 52.8 |
+| HN | 122.5 | 25.10 | 0.663 | 0.694 | 36.5 |
+| TH | 114.2 | 25.21 | 0.618 | 0.474 | 81.4 |
+| **Overall** | **112.6** | **25.35** | **0.653** | **0.562** | **58.0** |
+
+Key weaknesses: bone dice TH=0.249, AB=0.311; HD95 high and fold-variable (34–80mm).
+
 ## Post-Challenge Submission Budget
 
 - **2 Docker submissions per 60 days** via Grand Challenge
@@ -153,18 +180,35 @@ Local evaluation uses HU thresholds as a fast proxy.
 
 ## Roadmap
 
-- [x] Project structure
-- [x] Data download scripts
-- [x] Data exploration
-- [x] 5-fold CV splits
-- [x] 2D U-Net baseline with anatomy conditioning
-- [x] Attention U-Net variant
-- [x] Combined MAE + MS-SSIM loss
+### ✅ Done
+- [x] Project structure & data download
+- [x] Data exploration (EDA + plots)
+- [x] 5-fold CV splits (stratified by anatomy × center)
+- [x] AttentionUNet2D with anatomy conditioning
+- [x] Combined MAE + MS-SSIM loss (GDL optional)
 - [x] Full-volume inference pipeline
-- [x] Local metric evaluation
-- [x] Docker submission template
-- [ ] 3D patch-based training
-- [ ] Diffusion model (DDPM/DDIM)
-- [ ] Transformer backbone (Swin-UNETR)
-- [ ] Test-time augmentation
-- [ ] Ensemble across folds
+- [x] Local metric evaluation (MAE, PSNR, MS-SSIM, Dice, HD95)
+- [x] Grand Challenge Docker submission (official template-compliant)
+- [x] Baseline submission to GC Validation phase
+
+### 🔜 Round 2 — Loss improvements (same architecture)
+- [ ] Enable GDL (gradient difference loss) — `gdl_weight > 0`
+- [ ] Bone-weighted MAE (2–3× weight on HU > 200 voxels)
+- [ ] Body-mask-conditioned loss (only penalise inside mask)
+- [ ] Retrain 5 folds, re-submit
+
+### 🔜 Round 3 — Architecture experiments
+- [ ] 2.5D UNet (3-slice input, `in_channels=3`) — quick win for bone continuity
+- [ ] pix2pix / conditional GAN (PatchGAN discriminator) — improves MS-SSIM & sharpness
+- [ ] Swin-UNETR (Swin Transformer encoder + CNN decoder, via MONAI)
+- [ ] 2.5D ResUNet with deep supervision
+
+### 🔜 Round 4 — 3D & advanced
+- [ ] 3D patch-based UNet
+- [ ] Cascaded 2D→3D refinement (coarse 2D + 3D boundary refinement)
+- [ ] Diffusion model (DDPM/DDIM with fast sampling — 15 min budget)
+- [ ] Test-time augmentation (TTA: flips + anatomy)
+
+### 🔜 Round 5 — Final submission
+- [ ] Fold ensemble (average all 5 checkpoints)
+- [ ] Best model → Test phase submission (2-shot budget)
