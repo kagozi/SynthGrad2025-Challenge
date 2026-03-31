@@ -49,7 +49,7 @@ loss:
 # ── Training ────────────────────────────────────────────────
 training:
   epochs: 100
-  batch_size: 16         # 32 OOMs on 15.6GB GPU with depth-4 AttentionUNet2D at 512x512
+  batch_size: 8          # AttentionUNet2D at 512x512 needs 8; attention gates add extra activation tensors
   val_every_n_epochs: 5
   save_every_n_epochs: 10
 
