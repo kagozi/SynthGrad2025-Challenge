@@ -179,17 +179,18 @@ class GradientDifferenceLoss(nn.Module):
         pgx, pgy = grad(pred)
         tgx, tgy = grad(target)
 
-        diff = torch.abs(pgx - tgx) + torch.abs(pgy - tgy)
+        # pgx/tgx: (B,C,H,W-1)  |  pgy/tgy: (B,C,H-1,W) — different shapes, handle separately
+        diff_x = torch.abs(pgx - tgx)
+        diff_y = torch.abs(pgy - tgy)
 
         if mask is not None:
-            # Trim mask to match gradient spatial dims
             mx = mask[:, :, :, 1:] * mask[:, :, :, :-1]
             my = mask[:, :, 1:, :] * mask[:, :, :-1, :]
-            m  = mx + my
-            diff = diff * m
-            return diff.sum() / (m.sum() + 1e-8)
+            loss_x = (diff_x * mx).sum() / (mx.sum() + 1e-8)
+            loss_y = (diff_y * my).sum() / (my.sum() + 1e-8)
+            return (loss_x + loss_y) * 0.5
 
-        return diff.mean()
+        return (diff_x.mean() + diff_y.mean()) * 0.5
 
 
 # ── Combined Loss ──────────────────────────────────────────────────────────────
