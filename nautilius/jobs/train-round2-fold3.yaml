@@ -52,7 +52,7 @@ spec:
                   key: api-key
             - name: WANDB_PROJECT
               value: "synthrad2025-task1"
-            - name: PYTORCH_ALLOC_CONF
+            - name: PYTORCH_CUDA_ALLOC_CONF
               value: "expandable_segments:True"
 
           resources:

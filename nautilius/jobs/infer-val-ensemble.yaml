@@ -1,14 +1,17 @@
 # =============================================================================
-# Round 2 Training Job — Fold 2
-# GDL + Bone-weighted MAE + AMP + CaseGroupedSampler
+# Ensemble Inference Job — Official Validation Set (Round 2, 5 folds)
 #
-#   kubectl apply -f nautilius/jobs/train-round2-fold2.yaml
-#   kubectl logs -f job/synthrad2025-train-r2-fold2
+# Runs all 5 Round 2 best checkpoints, averages predictions, saves:
+#   /pvc/submissions/round2_ensemble/sct_{case_id}.mha  (one per case)
+#   /pvc/submissions/round2_ensemble.zip                (ready to submit)
+#
+#   kubectl apply -f nautilius/jobs/infer-val-ensemble.yaml
+#   kubectl logs -f job/synthrad2025-infer-val-ensemble
 # =============================================================================
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: synthrad2025-train-r2-fold2
+  name: synthrad2025-infer-val-ensemble
 spec:
   backoffLimit: 0
   ttlSecondsAfterFinished: 86400
@@ -31,37 +34,35 @@ spec:
                 values:
                 - "7"
       containers:
-        - name: trainer
+        - name: infer
           image: ghcr.io/kagozi/synthrad2025-train:latest
           imagePullPolicy: Always
-          command: ["python", "training/train.py"]
-          args:
-            - "--config"
-            - "training/configs/round2_unet2d.yaml"
-            - "--fold"
-            - "2"
-            # Uncomment to resume:
-            # - "--resume"
-            # - "/pvc/checkpoints/round2_unet2d/fold2_last.pth"
-
           env:
-            - name: WANDB_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: wandb-secret
-                  key: api-key
-            - name: WANDB_PROJECT
-              value: "synthrad2025-task1"
             - name: PYTORCH_CUDA_ALLOC_CONF
               value: "expandable_segments:True"
+          command: ["python", "inference/predict_ensemble.py"]
+          args:
+            - "--checkpoints"
+            - "/pvc/checkpoints/round2_unet2d/fold0_best.pth"
+            - "/pvc/checkpoints/round2_unet2d/fold1_best.pth"
+            - "/pvc/checkpoints/round2_unet2d/fold2_best.pth"
+            - "/pvc/checkpoints/round2_unet2d/fold3_best.pth"
+            - "/pvc/checkpoints/round2_unet2d/fold4_best.pth"
+            - "--input_dirs"
+            - "/pvc/data/synthRAD2025_Task1_Val_Input/Task1"
+            - "/pvc/data/synthRAD2025_Task1_Val_Input_D/Task1"
+            - "--output_dir"
+            - "/pvc/submissions/round2_ensemble"
+            - "--batch_size"
+            - "8"
 
           resources:
             requests:
-              memory: "27Gi"
+              memory: "32Gi"
               cpu: "8"
               nvidia.com/gpu: "1"
             limits:
-              memory: "32Gi"
+              memory: "48Gi"
               cpu: "8"
               nvidia.com/gpu: "1"
 
