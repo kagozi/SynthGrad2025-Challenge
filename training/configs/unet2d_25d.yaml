@@ -1,50 +1,56 @@
 # ============================================================
-# SynthRAD2025 Task 1 — Baseline 2D U-Net
-# Paths assume Nautilus NRP with PVC mounted at /pvc
+# SynthRAD2025 Task 1 — Round 3: 2.5D Attention U-Net
+#
+# Changes vs round2_unet2d.yaml:
+#   - n_context: 1   → 3-slice axial stack as input (s-1, s, s+1)
+#   - in_channels: 3 → model sees spatial context across slices
+#   - All Round 2 loss improvements retained (GDL, bone-weighted MAE)
+#   - batch_size: 8  → same as round 2 (extra channels add ~20% memory)
 # ============================================================
 
 experiment:
-  name: "baseline_unet2d"
+  name: "unet2d_25d"
   fold: 0
   seed: 42
 
 # ── Data ────────────────────────────────────────────────────
 data:
-  # List all root dirs containing training cases.
-  # Center D is split into its own zip/dir due to license.
   data_dirs:
     - "/pvc/data/synthRAD2025_Task1_Train/Task1"
     - "/pvc/data/synthRAD2025_Task1_Train_D/Task1"
 
   folds_csv:  "/pvc/data/splits/folds.csv"
-  slice_axis: 0              # 0=axial
-  pad_to: [512, 512]         # pad/crop H×W to fixed size (multiple of 32 for UNet)
+  slice_axis: 0
+  pad_to: [512, 512]
   skip_empty_slices: true
   empty_threshold: 0.01
   num_workers: 8
   pin_memory: true
+  n_context: 1              # 2.5D: 1 neighbouring slice on each side → 3-channel input
 
 # ── Model ───────────────────────────────────────────────────
 model:
-  name: "unet2d"             # unet2d | attention_unet2d
-  in_channels: 1
+  name: "attention_unet2d"
+  in_channels: 3            # 3-slice stack (s-1, s, s+1)
   out_channels: 1
   base_features: 64
-  depth: 4                   # encoder stages → 64/128/256/512/1024
+  depth: 4
   use_anatomy: true
-  n_anatomy: 3               # HN, TH, AB
+  n_anatomy: 3
 
 # ── Loss ────────────────────────────────────────────────────
 loss:
   w_mae:  1.0
   w_ssim: 1.0
-  w_gdl:  0.0
+  w_gdl:  0.5
   ms_ssim_levels: 5
+  bone_weight:    2.5
+  bone_threshold: -0.4
 
 # ── Training ────────────────────────────────────────────────
 training:
   epochs: 100
-  batch_size: 16         # AMP on 16GB GPU; 32 OOMs due to cuDNN workspace + skip connections
+  batch_size: 8
   val_every_n_epochs: 5
   save_every_n_epochs: 10
 
@@ -63,5 +69,5 @@ scheduler:
 
 # ── Output ──────────────────────────────────────────────────
 output:
-  checkpoint_dir: "/pvc/checkpoints/baseline_unet2d"
+  checkpoint_dir: "/pvc/checkpoints/unet2d_25d"
   save_best: true

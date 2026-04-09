@@ -107,12 +107,14 @@ class SynthRAD2DDataset(Dataset):
         skip_empty_slices: bool = True,
         empty_threshold: float = 0.01,  # min mask voxel fraction to keep slice
         pad_to: Optional[Tuple[int, int]] = (512, 512),  # pad slices to fixed H×W
+        n_context: int = 0,             # 2.5D: number of neighbouring slices on each side
     ):
         self.slice_axis         = slice_axis
         self.augment            = augment and (split == "train")
         self.skip_empty         = skip_empty_slices
         self.empty_threshold    = empty_threshold
         self.pad_to             = pad_to
+        self.n_context          = n_context
 
         # Filter by fold
         if fold_df is not None and fold is not None:
@@ -169,48 +171,53 @@ class SynthRAD2DDataset(Dataset):
         else:
             return arr[:, :, s]
 
-    def _pad_slice(self, mr: np.ndarray, ct: np.ndarray, mask: np.ndarray):
-        """Center-crop and/or pad H×W to self.pad_to."""
+    def _pad_array(self, arr: np.ndarray, fill_value: float = 0.0) -> np.ndarray:
+        """Center-crop and/or pad a 2D array to self.pad_to."""
         th, tw = self.pad_to
-        h,  w  = mr.shape
-
-        # Center-crop if larger than target
+        h, w   = arr.shape
         if h > th:
             start = (h - th) // 2
-            mr, ct, mask = mr[start:start+th, :], ct[start:start+th, :], mask[start:start+th, :]
+            arr   = arr[start:start+th, :]
         if w > tw:
             start = (w - tw) // 2
-            mr, ct, mask = mr[:, start:start+tw], ct[:, start:start+tw], mask[:, start:start+tw]
-
-        # Pad if smaller than target
-        h, w = mr.shape
+            arr   = arr[:, start:start+tw]
+        h, w = arr.shape
         ph, pw = max(0, th - h), max(0, tw - w)
         if ph > 0 or pw > 0:
-            pad = ((0, ph), (0, pw))
-            mr   = np.pad(mr,   pad, mode="constant", constant_values=0.0)
-            ct   = np.pad(ct,   pad, mode="constant", constant_values=-1.0)
-            mask = np.pad(mask, pad, mode="constant", constant_values=0.0)
-        return mr, ct, mask
+            arr = np.pad(arr, ((0, ph), (0, pw)), mode="constant", constant_values=fill_value)
+        return arr
+
+    def _pad_slice(self, mr: np.ndarray, ct: np.ndarray, mask: np.ndarray):
+        """Center-crop and/or pad H×W to self.pad_to."""
+        return (
+            self._pad_array(mr,   fill_value=0.0),
+            self._pad_array(ct,   fill_value=-1.0),
+            self._pad_array(mask, fill_value=0.0),
+        )
 
     def _augment(self, mr: np.ndarray, ct: np.ndarray, mask: np.ndarray):
-        """Simple 2D augmentation applied identically to MR, CT, mask."""
+        """Simple 2D augmentation applied identically to MR, CT, mask.
+
+        mr may be (H, W) for 2D or (C, H, W) for 2.5D — flips applied on
+        the last two spatial axes so both cases work identically.
+        """
         # Random horizontal flip
         if random.random() < 0.5:
-            mr   = np.fliplr(mr).copy()
+            mr   = np.flip(mr,   axis=-1).copy()
             ct   = np.fliplr(ct).copy()
             mask = np.fliplr(mask).copy()
 
         # Random vertical flip
         if random.random() < 0.3:
-            mr   = np.flipud(mr).copy()
+            mr   = np.flip(mr,   axis=-2).copy()
             ct   = np.flipud(ct).copy()
             mask = np.flipud(mask).copy()
 
         # Random brightness/contrast for MR only (not CT — HU must be preserved)
         if random.random() < 0.5:
-            factor  = random.uniform(0.85, 1.15)
-            shift   = random.uniform(-0.05, 0.05)
-            mr      = np.clip(mr * factor + shift, 0.0, 1.0)
+            factor = random.uniform(0.85, 1.15)
+            shift  = random.uniform(-0.05, 0.05)
+            mr     = np.clip(mr * factor + shift, 0.0, 1.0)
 
         return mr, ct, mask
 
@@ -238,18 +245,40 @@ class SynthRAD2DDataset(Dataset):
 
         mr_arr, ct_arr, mask_arr = _worker_cache[c_idx]
 
-        mr   = self._get_slice(mr_arr,   s)
         ct   = self._get_slice(ct_arr,   s)
         mask = self._get_slice(mask_arr, s)
 
-        if self.pad_to is not None:
-            mr, ct, mask = self._pad_slice(mr, ct, mask)
+        if self.n_context == 0:
+            mr = self._get_slice(mr_arr, s)
+            if self.pad_to is not None:
+                mr, ct, mask = self._pad_slice(mr, ct, mask)
+            mr_tensor = torch.from_numpy(mr[None])            # (1, H, W)
+        else:
+            # 2.5D: stack [s-n, ..., s, ..., s+n] slices → (2n+1, H, W)
+            n_slices = mr_arr.shape[self.slice_axis]
+            if self.pad_to is not None:
+                ct, mask = (
+                    self._pad_array(ct,   fill_value=-1.0),
+                    self._pad_array(mask, fill_value=0.0),
+                )
+            context = []
+            for offset in range(-self.n_context, self.n_context + 1):
+                sc  = max(0, min(n_slices - 1, s + offset))
+                slc = self._get_slice(mr_arr, sc)
+                if self.pad_to is not None:
+                    slc = self._pad_array(slc, fill_value=0.0)
+                context.append(slc)
+            mr = np.stack(context, axis=0)                    # (C, H, W)
+            mr_tensor = torch.from_numpy(mr)
 
         if self.augment:
-            mr, ct, mask = self._augment(mr, ct, mask)
+            mr_np, ct, mask = self._augment(
+                mr_tensor.numpy(), ct, mask
+            )
+            mr_tensor = torch.from_numpy(mr_np)
 
         return {
-            "mr":          torch.from_numpy(mr[None]),        # (1, H, W)
+            "mr":          mr_tensor,                         # (1 or C, H, W)
             "ct":          torch.from_numpy(ct[None]),        # (1, H, W)
             "mask":        torch.from_numpy(mask[None]),      # (1, H, W)
             "anatomy_idx": torch.tensor(ANATOMY_TO_IDX[anatomy], dtype=torch.long),
@@ -399,9 +428,10 @@ class SynthRADInferenceDataset(Dataset):
     Used during validation/test prediction.
     """
 
-    def __init__(self, case_path: Path, anatomy: str):
+    def __init__(self, case_path: Path, anatomy: str, n_context: int = 0):
         self.case_path = case_path
         self.anatomy   = anatomy
+        self.n_context = n_context
 
         mr_arr      = load_mha(case_path / "mr.mha")
         self.mr_arr = normalise_mr(mr_arr, anatomy)
@@ -417,11 +447,20 @@ class SynthRADInferenceDataset(Dataset):
         return self.n_slices
 
     def __getitem__(self, s: int) -> Dict:
-        mr   = self.mr_arr[s, :, :]
+        if self.n_context == 0:
+            mr = self.mr_arr[s, :, :][None].copy()           # (1, H, W)
+        else:
+            D = self.n_slices
+            context = []
+            for offset in range(-self.n_context, self.n_context + 1):
+                sc = max(0, min(D - 1, s + offset))
+                context.append(self.mr_arr[sc, :, :])
+            mr = np.stack(context, axis=0).copy()             # (C, H, W)
+
         mask = self.mask[s, :, :]
         return {
-            "mr":   torch.from_numpy(mr[None].copy()),
-            "mask": torch.from_numpy(mask[None].copy()),
+            "mr":        torch.from_numpy(mr),
+            "mask":      torch.from_numpy(mask[None].copy()),
             "slice_idx": s,
         }
 
