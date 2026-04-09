@@ -66,9 +66,10 @@ def load_model(checkpoint_path: str, device: torch.device):
     model.load_state_dict(ckpt["model"])
     model.eval()
     model.to(device)
+    n_context = cfg.get("data", {}).get("n_context", 0)
     print(f"[Predict] Loaded checkpoint (epoch {ckpt.get('epoch','?')}, "
-          f"best MAE={ckpt.get('best_mae', '?'):.2f})")
-    return model
+          f"best MAE={ckpt.get('best_mae', '?'):.2f}, n_context={n_context})")
+    return model, n_context
 
 
 # ── Predict single case ────────────────────────────────────────────────────────
@@ -80,11 +81,12 @@ def predict_case(
     anatomy: str,
     device: torch.device,
     batch_size: int = 16,
+    n_context: int = 0,
 ) -> np.ndarray:
     """
     Returns predicted sCT volume in HU, same shape as input MR.
     """
-    ds     = SynthRADInferenceDataset(case_path, anatomy)
+    ds     = SynthRADInferenceDataset(case_path, anatomy, n_context=n_context)
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=0)
 
     anatomy_idx = torch.tensor(
@@ -128,7 +130,7 @@ def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[Predict] Device: {device}")
 
-    model = load_model(args.checkpoint, device)
+    model, n_context = load_model(args.checkpoint, device)
 
     input_dir  = Path(args.input_dir)
     output_dir = Path(args.output_dir)
@@ -156,7 +158,8 @@ def main(args):
 
         try:
             pred_hu = predict_case(
-                model, path, anatomy, device, batch_size=args.batch_size
+                model, path, anatomy, device,
+                batch_size=args.batch_size, n_context=n_context,
             )
 
             # Save predicted sCT

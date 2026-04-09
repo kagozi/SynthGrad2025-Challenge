@@ -210,6 +210,7 @@ def validate(
     val_datasets: list,   # list of (case_meta, SynthRADInferenceDataset)
     device: torch.device,
     epoch: int,
+    n_context: int = 0,
 ) -> dict:
     model.eval()
     ANAT_IDX = {"HN": 0, "TH": 1, "AB": 2}
@@ -236,7 +237,8 @@ def validate(
             mr  = batch["mr"].to(device, non_blocking=True)
             out = model(mr, anat_t.expand(mr.size(0)))
             slices.append(out.squeeze(1).cpu().numpy())
-            mr_slices.append(batch["mr"].squeeze(1).numpy())   # keep normalised MR
+            # For visualization keep the center MR channel only (index n_context)
+            mr_slices.append(batch["mr"][:, n_context].numpy())
 
         pred_hu  = denormalise_ct(np.concatenate(slices, axis=0))
         mr_norm  = np.concatenate(mr_slices, axis=0)           # (D, H, W) in [0, 1]
@@ -331,13 +333,15 @@ def train(cfg: dict, fold: int, resume: str = None):
             "Run: python scripts/prepare_folds.py"
         )
 
-    pad_to = tuple(dc["pad_to"]) if dc.get("pad_to") else None
+    pad_to    = tuple(dc["pad_to"]) if dc.get("pad_to") else None
+    n_context = dc.get("n_context", 0)
     train_ds = SynthRAD2DDataset(
         case_list=case_list, fold_df=fold_df, fold=fold, split="train",
         slice_axis=dc["slice_axis"], augment=True,
         skip_empty_slices=dc["skip_empty_slices"],
         empty_threshold=dc["empty_threshold"],
         pad_to=pad_to,
+        n_context=n_context,
     )
     val_case_ids = set(fold_df[fold_df["fold"] == fold]["case_id"])
     val_cases    = [c for c in case_list if c["case_id"] in val_case_ids]
@@ -363,7 +367,7 @@ def train(cfg: dict, fold: int, resume: str = None):
         path = Path(case["path"])
         if not (path / "ct.mha").exists():
             continue
-        ds = SynthRADInferenceDataset(path, case["anatomy"])
+        ds = SynthRADInferenceDataset(path, case["anatomy"], n_context=n_context)
         val_datasets.append((case, ds))
     print(f"[Train] Train slices: {len(train_ds)}  |  Val cases: {len(val_datasets)}")
     wandb.config.update({"train_slices": len(train_ds), "val_cases": len(val_datasets)})
@@ -451,7 +455,7 @@ def train(cfg: dict, fold: int, resume: str = None):
         # ── Validation ─────────────────────────────────────────────────────────
         if (epoch + 1) % tc["val_every_n_epochs"] == 0 or epoch == tc["epochs"] - 1:
             torch.cuda.empty_cache()
-            val_results = validate(model, val_datasets, device, epoch)
+            val_results = validate(model, val_datasets, device, epoch, n_context=n_context)
             val_mae     = val_results.get("val/mae", float("inf"))
 
             if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
