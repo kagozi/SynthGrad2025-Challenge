@@ -240,3 +240,31 @@ class CombinedLoss(nn.Module):
 
         losses["total"] = sum(losses.values())
         return losses
+
+
+# ── GAN Loss ────────────────────────────────────────────────────────────────────
+
+class GANLoss(nn.Module):
+    """
+    Adversarial loss for PatchGAN (BCEWithLogitsLoss).
+
+    Wraps target-tensor creation so the caller only passes is_real=True/False.
+    Uses soft real labels (0.9) for training stability.
+
+    Usage:
+        criterion_gan = GANLoss()
+        L_D = 0.5 * (criterion_gan(D(real), True) + criterion_gan(D(fake), False))
+        L_G_adv = criterion_gan(D(fake), True)
+    """
+
+    def __init__(self, real_label: float = 0.9, fake_label: float = 0.0):
+        super().__init__()
+        self.real_label = real_label
+        self.fake_label = fake_label
+
+    def _target(self, pred: torch.Tensor, is_real: bool) -> torch.Tensor:
+        val = self.real_label if is_real else self.fake_label
+        return torch.full_like(pred, val)
+
+    def forward(self, pred: torch.Tensor, is_real: bool) -> torch.Tensor:
+        return F.binary_cross_entropy_with_logits(pred, self._target(pred, is_real))
