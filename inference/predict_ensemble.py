@@ -56,17 +56,19 @@ def load_model(checkpoint_path: str, device: torch.device):
     model = AttentionUNet2D(**kwargs) if mc["name"] == "attention_unet2d" else UNet2D(**kwargs)
     model.load_state_dict(ckpt["model"])
     model.eval().to(device)
-    epoch    = ckpt.get("epoch", "?")
-    best_mae = ckpt.get("best_mae", float("nan"))
-    print(f"  Loaded {Path(checkpoint_path).name}  epoch={epoch}  best_MAE={best_mae:.2f}")
-    return model
+    n_context = cfg.get("data", {}).get("n_context", 0)
+    epoch     = ckpt.get("epoch", "?")
+    best_mae  = ckpt.get("best_mae", float("nan"))
+    print(f"  Loaded {Path(checkpoint_path).name}  epoch={epoch}  best_MAE={best_mae:.2f}  n_context={n_context}")
+    return model, n_context
 
 
 @torch.no_grad()
 def predict_case_norm(model, case_path: Path, anatomy: str,
-                      device: torch.device, batch_size: int) -> np.ndarray:
+                      device: torch.device, batch_size: int,
+                      n_context: int = 0) -> np.ndarray:
     """Run model on one case; return normalised predictions (D, H, W) in [-1,1]."""
-    ds     = SynthRADInferenceDataset(case_path, anatomy)
+    ds     = SynthRADInferenceDataset(case_path, anatomy, n_context=n_context)
     loader = DataLoader(ds, batch_size=batch_size, shuffle=False, num_workers=0)
     ai     = torch.tensor([ANATOMY_TO_IDX[anatomy]], dtype=torch.long, device=device)
     slices = []
@@ -92,7 +94,12 @@ def main(args):
 
     # Load all models
     print(f"[Ensemble] Loading {len(args.checkpoints)} checkpoints...")
-    models = [load_model(ckpt, device) for ckpt in args.checkpoints]
+    models_and_contexts = [load_model(ckpt, device) for ckpt in args.checkpoints]
+    models     = [m for m, _ in models_and_contexts]
+    n_contexts = [n for _, n in models_and_contexts]
+    assert len(set(n_contexts)) == 1, f"Mismatched n_context across checkpoints: {n_contexts}"
+    n_context = n_contexts[0]
+    print(f"[Ensemble] n_context={n_context} ({1 + 2*n_context}-channel input)")
 
     # Build case list across all input dirs
     all_cases = build_case_list(args.input_dirs)
@@ -111,7 +118,7 @@ def main(args):
             # Average normalised predictions across all folds
             pred_norm = np.zeros(0, dtype=np.float32)
             for i, model in enumerate(models):
-                p = predict_case_norm(model, path, anatomy, device, args.batch_size)
+                p = predict_case_norm(model, path, anatomy, device, args.batch_size, n_context)
                 pred_norm = p if i == 0 else pred_norm + p
             pred_norm /= len(models)
 

@@ -31,3 +31,7 @@ wandb/
 data/*.zip
 paper
 *.gz
+*.zip
+
+make_presentation.py
+plot_val_metrics.py
