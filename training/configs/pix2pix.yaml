@@ -1,0 +1,95 @@
+# ============================================================
+# SynthRAD2025 Task 1 — Round 4: pix2pix / Conditional GAN
+#
+# Generator  : AttentionUNet2D (same as Round 2/3)
+# Discriminator: 70×70 PatchGAN (NLayerDiscriminator, n_layers=3)
+#
+# Pixel loss  : MAE + MS-SSIM + GDL (all Round 2 improvements kept)
+# Adv loss    : GANLoss (BCEWithLogitsLoss, soft labels 0.9/0.0)
+# G total     : pixel_loss + lambda_adv * adv_loss
+# D total     : 0.5 * (real + fake)
+#
+# Run: python training/train_pix2pix.py --config training/configs/pix2pix.yaml
+# ============================================================
+
+experiment:
+  name: "pix2pix"
+  fold: 0
+  seed: 42
+
+# ── Data ────────────────────────────────────────────────────
+data:
+  data_dirs:
+    - "/pvc/data/synthRAD2025_Task1_Train/Task1"
+    - "/pvc/data/synthRAD2025_Task1_Train_D/Task1"
+  folds_csv:  "/pvc/data/splits/folds.csv"
+  slice_axis: 0
+  pad_to: [512, 512]
+  skip_empty_slices: true
+  empty_threshold: 0.01
+  num_workers: 8
+  pin_memory: true
+  n_context: 0               # 2D; switch to 1 for 2.5D pix2pix later
+
+# ── Models ──────────────────────────────────────────────────
+model:
+  generator:
+    name: "attention_unet2d"
+    in_channels: 1
+    out_channels: 1
+    base_features: 64
+    depth: 4
+    use_anatomy: true
+    n_anatomy: 3
+
+  discriminator:
+    name: "patchgan"
+    in_channels: 2            # cat(mr_1ch, ct)
+    ndf: 64
+    n_layers: 3               # → 70×70 receptive field
+    use_anatomy: true
+    n_anatomy: 3
+
+# ── Loss ────────────────────────────────────────────────────
+loss:
+  # Pixel terms (identical to round2_unet2d)
+  w_mae:  1.0
+  w_ssim: 1.0
+  w_gdl:  0.5
+  ms_ssim_levels: 5
+  bone_weight:    2.5
+  bone_threshold: -0.4        # HU 200 in normalised [-1,1] space
+  # Adversarial weight
+  lambda_adv: 1.0             # scale up to 2.0 if GAN signal is weak
+
+# ── Training ────────────────────────────────────────────────
+training:
+  epochs: 100
+  batch_size: 8
+  val_every_n_epochs: 5
+  save_every_n_epochs: 10
+
+# ── Optimisers (standard GAN betas: 0.5/0.999) ──────────────
+optimizer:
+  generator:
+    name: "adamw"
+    lr: 2.0e-4
+    weight_decay: 1.0e-5
+    betas: [0.5, 0.999]
+
+  discriminator:
+    name: "adamw"
+    lr: 1.0e-4                # D typically trained at half G lr
+    weight_decay: 1.0e-5
+    betas: [0.5, 0.999]
+
+# ── Scheduler (applied to both G and D independently) ────────
+scheduler:
+  name: "cosine"
+  T_max: 100
+  eta_min: 1.0e-6
+
+# ── Output ──────────────────────────────────────────────────
+output:
+  checkpoint_dir: "/pvc/checkpoints/pix2pix"
+  save_best: true
