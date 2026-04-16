@@ -245,6 +245,7 @@ def validate(G, val_datasets, device, epoch, n_context=0):
     wandb.log(results)
     log_sample_images(sample_volumes, epoch)
 
+    G.train()
     mae = results.get("val/mae", float("inf"))
     print(f"  Val  MAE={mae:.2f}  PSNR={results.get('val/psnr',0):.2f}  "
           f"MS-SSIM={results.get('val/ms_ssim',0):.4f}  (n={len(all_metrics)} cases)")
@@ -396,6 +397,8 @@ def train(cfg: dict, fold: int, resume: str = None):
 
             # ── G step: full forward with gradient ───────────────────────────
             opt_G.zero_grad(set_to_none=True)
+            for p in D.parameters():
+                p.requires_grad_(False)
 
             with torch.amp.autocast("cuda", enabled=use_amp):
                 pred_g    = G(mr, ai)
@@ -409,6 +412,8 @@ def train(cfg: dict, fold: int, resume: str = None):
             nn.utils.clip_grad_norm_(G.parameters(), max_norm=1.0)
             scaler_G.step(opt_G)
             scaler_G.update()
+            for p in D.parameters():
+                p.requires_grad_(True)
 
             accum["L_G"].append(L_G.item())
             accum["L_G_adv"].append(L_G_adv.item())

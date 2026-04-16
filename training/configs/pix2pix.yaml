@@ -60,7 +60,10 @@ loss:
   bone_weight:    2.5
   bone_threshold: -0.4        # HU 200 in normalised [-1,1] space
   # Adversarial weight
-  lambda_adv: 1.0             # scale up to 2.0 if GAN signal is weak
+  # Original pix2pix paper uses lambda_L1=100 vs lambda_adv=1 (~1% GAN).
+  # Our pixel loss total ≈ 2.5 → lambda_adv=0.05 gives ~2% GAN signal,
+  # keeping adversarial regularisation without overriding HU accuracy.
+  lambda_adv: 0.05            # was 1.0; increase only if D signal is too weak
 
 # ── Training ────────────────────────────────────────────────
 training:
