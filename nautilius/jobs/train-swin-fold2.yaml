@@ -53,12 +53,12 @@ spec:
               value: "/pvc/pretrained"
           resources:
             requests:
-              memory: "28Gi"
-              cpu: "4"
+              memory: "14Gi"
+              cpu: "2"
               nvidia.com/gpu: "1"
             limits:
-              memory: "36Gi"
-              cpu: "6"
+              memory: "16Gi"
+              cpu: "2"
               nvidia.com/gpu: "1"
           volumeMounts:
             - name: synthrad2025-vol
