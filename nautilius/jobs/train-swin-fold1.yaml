@@ -53,11 +53,11 @@ spec:
               value: "/pvc/pretrained"
           resources:
             requests:
-              memory: "40Gi"
-              cpu: "8"
+              memory: "28Gi"
+              cpu: "4"
               nvidia.com/gpu: "1"
             limits:
-              memory: "48Gi"
+              memory: "36Gi"
               cpu: "8"
               nvidia.com/gpu: "1"
           volumeMounts:
