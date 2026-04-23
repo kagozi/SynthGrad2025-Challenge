@@ -49,6 +49,13 @@ COPY --chown=algorithm:algorithm docker/process.py     /opt/app/
 # ── Project source ─────────────────────────────────────────────────────────
 COPY --chown=algorithm:algorithm src/ /opt/app/src/
 
-# Model weights are uploaded separately and extracted to /opt/ml/model/ at runtime
+# ── Model weights (baked in at build time) ─────────────────────────────────
+# Place fold checkpoints under docker/weights/ before building:
+#   docker/weights/fold0_best.pth
+#   docker/weights/fold1_best.pth
+#   ...
+# They are copied to /opt/ml/model/ inside the container.
+RUN mkdir -p /opt/ml/model
+COPY --chown=algorithm:algorithm docker/weights/ /opt/ml/model/
 
 ENTRYPOINT python -m process $0 $@

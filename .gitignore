@@ -34,4 +34,4 @@ paper
 *.zip
 
 make_presentation.py
-plot_val_metrics.py
+plot_val_metrics.pydocker/weights/*.pth
