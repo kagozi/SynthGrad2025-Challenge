@@ -627,7 +627,7 @@ def train(cfg: dict, fold: int, resume: str = None):
     print(f"\n[Train] Done. Best val MAE: {best_mae:.2f} HU")
 
 
-# ── Entry ──────────────────────────────────────────────────────────────────────
+# ── Entry -──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
