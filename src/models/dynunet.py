@@ -161,10 +161,10 @@ class DynUNETR3D(nn.Module):
             return main_out, aux_outs
 
         else:
-            # Eval mode or deep_supervision disabled: single output
-            if self._deep_supervision:
-                raw = raw[:, 0]   # take main output only
-
+            # Eval mode or deep_supervision disabled: single output.
+            # NOTE: MONAI DynUNet returns [B, N, C, D, H, W] only during training.
+            # In eval mode it already returns [B, C, D, H, W] (main output only),
+            # so we must NOT slice [:, 0] here — that would drop the channel dim.
             if self.use_anatomy and anatomy_idx is not None:
                 return self.film_head(raw, anatomy_idx)
             return self.out_act(raw)
