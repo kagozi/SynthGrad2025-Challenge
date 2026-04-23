@@ -163,6 +163,8 @@ class GradientDifferenceLoss(nn.Module):
     """
     Penalises blurry predictions by matching image gradients.
     Helps preserve HU boundaries at bone/soft-tissue interfaces.
+
+    Supports both 2D inputs (B, C, H, W) and 3D inputs (B, C, D, H, W).
     """
 
     def forward(
@@ -171,26 +173,45 @@ class GradientDifferenceLoss(nn.Module):
         target: torch.Tensor,
         mask: torch.Tensor = None,
     ) -> torch.Tensor:
-        def grad(t):
-            gx = t[:, :, :, 1:] - t[:, :, :, :-1]
-            gy = t[:, :, 1:, :] - t[:, :, :-1, :]
-            return gx, gy
+        ndim = pred.ndim  # 4 for 2D, 5 for 3D
 
-        pgx, pgy = grad(pred)
-        tgx, tgy = grad(target)
+        if ndim == 4:
+            # 2D: gradients along H and W axes
+            axes = [(-2, slice(None), slice(1, None)),   # W: axis -1
+                    (-1, slice(1, None), slice(None))]   # H: axis -2
+            def _grad_pair(t):
+                gx = t[:, :, :, 1:] - t[:, :, :, :-1]
+                gy = t[:, :, 1:, :] - t[:, :, :-1, :]
+                return [gx, gy]
+            def _mask_pair(m):
+                mx = m[:, :, :, 1:] * m[:, :, :, :-1]
+                my = m[:, :, 1:, :] * m[:, :, :-1, :]
+                return [mx, my]
+        else:
+            # 3D: gradients along D, H, W axes
+            def _grad_pair(t):
+                gz = t[:, :, 1:, :, :] - t[:, :, :-1, :, :]  # depth
+                gy = t[:, :, :, 1:, :] - t[:, :, :, :-1, :]  # height
+                gx = t[:, :, :, :, 1:] - t[:, :, :, :, :-1]  # width
+                return [gz, gy, gx]
+            def _mask_pair(m):
+                mz = m[:, :, 1:, :, :] * m[:, :, :-1, :, :]
+                my = m[:, :, :, 1:, :] * m[:, :, :, :-1, :]
+                mx = m[:, :, :, :, 1:] * m[:, :, :, :, :-1]
+                return [mz, my, mx]
 
-        # pgx/tgx: (B,C,H,W-1)  |  pgy/tgy: (B,C,H-1,W) — different shapes, handle separately
-        diff_x = torch.abs(pgx - tgx)
-        diff_y = torch.abs(pgy - tgy)
+        p_grads = _grad_pair(pred)
+        t_grads = _grad_pair(target)
+        diffs   = [torch.abs(pg - tg) for pg, tg in zip(p_grads, t_grads)]
 
         if mask is not None:
-            mx = mask[:, :, :, 1:] * mask[:, :, :, :-1]
-            my = mask[:, :, 1:, :] * mask[:, :, :-1, :]
-            loss_x = (diff_x * mx).sum() / (mx.sum() + 1e-8)
-            loss_y = (diff_y * my).sum() / (my.sum() + 1e-8)
-            return (loss_x + loss_y) * 0.5
+            masks  = _mask_pair(mask)
+            losses = [(d * m).sum() / (m.sum() + 1e-8)
+                      for d, m in zip(diffs, masks)]
+        else:
+            losses = [d.mean() for d in diffs]
 
-        return (diff_x.mean() + diff_y.mean()) * 0.5
+        return sum(losses) / len(losses)
 
 
 # ── Combined Loss ──────────────────────────────────────────────────────────────

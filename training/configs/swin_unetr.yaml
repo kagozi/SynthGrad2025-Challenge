@@ -1,0 +1,99 @@
+# ============================================================
+# SynthRAD2025 Task 1 — Swin-UNETR (MONAI, 3D patch-based)
+#
+# Key design decisions:
+#   - 3D patch training: (64, 128, 128) random crops
+#   - MONAI SSL pretrained encoder (feature_size=48, masked inpainting on 5050 volumes)
+#   - Anatomy FiLM head (residual, ~35K params) on top of backbone
+#   - Differential LR: encoder × 0.1, decoder × 1.0
+#   - Gradient checkpointing in Swin blocks (saves ~30% VRAM)
+#   - Sliding window inference (overlap=0.5, Gaussian weighting)
+#   - Loss: bone-weighted MAE + GDL (both 3D-compatible)
+#   - AMP (fp16) + gradient clipping
+# ============================================================
+
+experiment:
+  name: "swin_unetr"
+  fold: 0
+  seed: 42
+
+# ── Data ────────────────────────────────────────────────────
+data:
+  data_dirs:
+    - "/pvc/data/synthRAD2025_Task1_Train/Task1"
+    - "/pvc/data/synthRAD2025_Task1_Train_D/Task1"
+
+  folds_csv:  "/pvc/data/splits/folds.csv"
+
+  # 3D patch settings (must be divisible by 32 for Swin-UNETR)
+  patch_size:          [64, 128, 128]
+  samples_per_volume:  8         # random patches drawn per volume per epoch
+
+  # Augmentation (applied in 3D)
+  augment:             true
+
+  # MONAI RandCropByPosNegLabel — prefer mask-positive crops
+  pos_neg_ratio:       3         # 3× more patches centred in foreground vs background
+
+  num_workers:         8
+  pin_memory:          true
+
+# ── Model ───────────────────────────────────────────────────
+model:
+  name:            "swin_unetr"
+  img_size:        [64, 128, 128]   # must match patch_size
+  in_channels:     1
+  feature_size:    48               # 48 = MONAI pretrained checkpoint size
+  use_checkpoint:  true             # gradient checkpointing (memory saver)
+  n_anatomy:       3
+  use_anatomy:     true
+  film_hidden:     128
+  pretrained:      true
+  pretrained_cache_dir: "/pvc/pretrained"
+
+  # Regularisation in Swin blocks
+  drop_rate:           0.0
+  attn_drop_rate:      0.0
+  dropout_path_rate:   0.1          # stochastic depth
+
+# ── Loss ────────────────────────────────────────────────────
+loss:
+  w_mae:          1.0
+  w_gdl:          0.5               # gradient difference — sharpens boundaries
+  bone_weight:    2.5               # upweight voxels > bone_threshold
+  bone_threshold: -0.4              # HU 200 ≈ -0.4 in [-1,1] normalised space
+
+# ── Training ────────────────────────────────────────────────
+training:
+  epochs:               150
+  batch_size:           2           # 3D patches — memory limited
+  val_every_n_epochs:   5
+  save_every_n_epochs:  10
+  warmup_epochs:        5           # linear warmup before cosine decay
+  unfreeze_encoder_epoch: 10        # fine-tune encoder after N epochs (vs. frozen initially)
+
+# ── Optimiser ───────────────────────────────────────────────
+optimizer:
+  name:         "adamw"
+  lr:           2.0e-4             # decoder LR
+  encoder_lr_scale: 0.1            # encoder LR = lr × this factor
+  weight_decay: 1.0e-5
+  betas:        [0.9, 0.999]
+
+# ── Scheduler ───────────────────────────────────────────────
+scheduler:
+  name:    "cosine"
+  T_max:   150
+  eta_min: 1.0e-6
+
+# ── Sliding window inference ─────────────────────────────────
+inference:
+  roi_size:      [64, 128, 128]
+  sw_batch_size: 4
+  overlap:       0.5
+  mode:          "gaussian"       # Gaussian weighting over overlapping windows
+
+# ── Output ──────────────────────────────────────────────────
+output:
+  checkpoint_dir: "/pvc/checkpoints/swin_unetr"
+  save_best:      true
