@@ -163,7 +163,6 @@ class SwinUNETR3D(nn.Module):
         self.use_anatomy = use_anatomy
 
         self.swin_unetr = _MonaiSwinUNETR(
-            img_size            = img_size,
             in_channels         = in_channels,
             out_channels        = 1,
             feature_size        = feature_size,
