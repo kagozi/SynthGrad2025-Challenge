@@ -1,0 +1,86 @@
+# ============================================================
+# SynthRAD2025 Task 1 — DynUNet (MONAI nnU-Net, 3D anisotropic)
+#
+# Key design decisions:
+#   - Anisotropic kernels: [3,3,1] + strides [2,2,1] at early stages
+#     → directly respects 1×1×3 mm spacing (targets TH bone / HD95)
+#   - Deep supervision: 2 auxiliary decoder outputs (weights 0.5 / 0.25)
+#   - Residual blocks in DynUNet (res_block=true)
+#   - Anatomy FiLM head (same as Swin-UNETR, ~35K params)
+#   - No pretrained weights — trained from scratch
+#   - Same 3D patch size / augmentation / loss as Swin-UNETR for fair comparison
+# ============================================================
+
+experiment:
+  name: "dynunet"
+  fold: 0
+  seed: 42
+
+# ── Data ────────────────────────────────────────────────────
+data:
+  data_dirs:
+    - "/pvc/data/synthRAD2025_Task1_Train/Task1"
+    - "/pvc/data/synthRAD2025_Task1_Train_D/Task1"
+
+  folds_csv: "/pvc/data/splits/folds.csv"
+
+  patch_size:          [64, 128, 128]
+  samples_per_volume:  8
+
+  augment: true
+  num_workers: 8
+  pin_memory: true
+
+# ── Model ───────────────────────────────────────────────────
+model:
+  name:             "dynunet"
+  in_channels:      1
+  n_anatomy:        3
+  use_anatomy:      true
+  film_hidden:      128
+  deep_supervision: true
+  deep_supr_num:    2           # 2 auxiliary outputs
+  res_block:        true        # residual blocks (better accuracy, ~10% more memory)
+  filters:          null        # null = MONAI auto (32,64,128,256,320,...)
+  dropout:          0.0
+
+# ── Loss ────────────────────────────────────────────────────
+loss:
+  w_mae:          1.0
+  w_gdl:          0.5
+  bone_weight:    2.5
+  bone_threshold: -0.4
+  # Deep supervision auxiliary loss weights (applied to downsampled targets)
+  aux_weights:    [0.5, 0.25]
+
+# ── Training ────────────────────────────────────────────────
+training:
+  epochs:               150
+  batch_size:           2
+  val_every_n_epochs:   5
+  save_every_n_epochs:  10
+
+# ── Optimiser ───────────────────────────────────────────────
+optimizer:
+  name:         "adamw"
+  lr:           2.0e-4
+  weight_decay: 1.0e-5
+  betas:        [0.9, 0.999]
+
+# ── Scheduler ───────────────────────────────────────────────
+scheduler:
+  name:    "cosine"
+  T_max:   150
+  eta_min: 1.0e-6
+
+# ── Sliding window inference ─────────────────────────────────
+inference:
+  roi_size:      [64, 128, 128]
+  sw_batch_size: 4
+  overlap:       0.5
+  mode:          "gaussian"
+
+# ── Output ──────────────────────────────────────────────────
+output:
+  checkpoint_dir: "/pvc/checkpoints/dynunet"
+  save_best:      true
