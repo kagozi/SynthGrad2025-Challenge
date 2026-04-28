@@ -1,0 +1,81 @@
+# =============================================================================
+# Single-Fold Inference Job — Official Validation Set (Swin-UNETR 3D, fold 0)
+#
+# Runs fold0 checkpoint only, saves:
+#   /pvc/submissions/swin_fold0/sct_{case_id}.mha  (one per case)
+#   /pvc/submissions/swin_fold0.zip                (ready to submit)
+#
+#   kubectl apply -f nautilius/jobs/infer-val-swin-fold0.yaml
+#   kubectl logs -f job/synthrad2025-infer-val-swin-fold0
+# =============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: synthrad2025-infer-val-swin-fold0
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      restartPolicy: Never
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: NotIn
+                values:
+                - k8s-chase-ci-10.calit2.optiputer.net
+                - k8s-haosu-02.sdsc.optiputer.net
+                - k8s-haosu-03.sdsc.optiputer.net
+              - key: nvidia.com/gpu.compute.major
+                operator: Gt
+                values:
+                - "7"
+      containers:
+        - name: infer
+          image: ghcr.io/kagozi/synthrad2025-train:latest
+          imagePullPolicy: Always
+          env:
+            - name: PYTORCH_CUDA_ALLOC_CONF
+              value: "expandable_segments:True"
+          command: ["python", "inference/predict_swin.py"]
+          args:
+            - "--checkpoints"
+            - "/pvc/checkpoints/swin_unetr/fold0_best.pth"
+            - "--input_dirs"
+            - "/pvc/data/synthRAD2025_Task1_Val_Input/Task1"
+            - "/pvc/data/synthRAD2025_Task1_Val_Input_D/Task1"
+            - "--output_dir"
+            - "/pvc/submissions/swin_fold0"
+
+          resources:
+            requests:
+              memory: "32Gi"
+              cpu: "8"
+              nvidia.com/gpu: "1"
+            limits:
+              memory: "48Gi"
+              cpu: "8"
+              nvidia.com/gpu: "1"
+
+          volumeMounts:
+            - name: synthrad2025-vol
+              mountPath: /pvc
+            - name: dshm
+              mountPath: /dev/shm
+
+      volumes:
+        - name: synthrad2025-vol
+          persistentVolumeClaim:
+            claimName: synthrad2025-pvc
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"
