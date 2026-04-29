@@ -1,0 +1,44 @@
+# =============================================================================
+# One-off job: plot one MR+CT sample per anatomy in all 3 views.
+# Output saved to /pvc/data/plots/samples_3views.png
+#
+#   kubectl apply -f nautilius/jobs/plot-samples.yaml
+#   kubectl logs -f job/synthrad2025-plot-samples
+#
+# Copy result locally once done:
+#   kubectl cp synthrad2025-uploader:/pvc/data/plots/samples_3views.png \
+#       data/splits/plots/samples_3views.png
+# =============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: synthrad2025-plot-samples
+spec:
+  ttlSecondsAfterFinished: 3600    # auto-cleanup after 1 hour
+  template:
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: plot
+          image: ghcr.io/kagozi/synthrad2025-train:latest
+          imagePullPolicy: Always
+          command: ["python", "scripts/plot_samples.py"]
+          args:
+            - "--data_dir"
+            - "/pvc/data/synthRAD2025_Task1_Train/Task1"
+            - "--out"
+            - "/pvc/data/plots/samples_3views.png"
+          resources:
+            requests:
+              memory: "16Gi"
+              cpu: "4"
+            limits:
+              memory: "20Gi"
+              cpu: "4800m"
+          volumeMounts:
+            - name: synthrad2025-vol
+              mountPath: /pvc
+      volumes:
+        - name: synthrad2025-vol
+          persistentVolumeClaim:
+            claimName: synthrad2025-pvc

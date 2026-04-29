@@ -61,7 +61,8 @@ spec:
               cpu: "2"
               nvidia.com/gpu: "1"
           volumeMounts:
-            - name: synthrad2025-vol
+            - name: synthrad2025-vol 
+            
               mountPath: /pvc
             - name: dshm
               mountPath: /dev/shm
