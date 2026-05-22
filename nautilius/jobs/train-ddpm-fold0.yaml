@@ -25,10 +25,13 @@ spec:
                 - k8s-chase-ci-10.calit2.optiputer.net
                 - k8s-haosu-02.sdsc.optiputer.net
                 - k8s-haosu-03.sdsc.optiputer.net
-              - key: nvidia.com/gpu.compute.major
-                operator: Gt
+              # A100 80GB required — base_ch=64/batch=16 at 512×512 needs ~40GB+
+              - key: nvidia.com/gpu.product
+                operator: In
                 values:
-                - "7"       # requires sm_80+ (Ampere+)
+                - NVIDIA-A100-SXM4-80GB
+                - NVIDIA-A100-80GB-PCIe
+                - NVIDIA-A100-PCIE-80GB
       containers:
         - name: trainer
           image: ghcr.io/kagozi/synthrad2025-train:latest
@@ -56,11 +59,11 @@ spec:
 
           resources:
             requests:
-              memory: "27Gi"
+              memory: "48Gi"
               cpu: "8"
               nvidia.com/gpu: "1"
             limits:
-              memory: "32Gi"
+              memory: "64Gi"
               cpu: "8"
               nvidia.com/gpu: "1"
 

@@ -398,7 +398,7 @@ def train(cfg: dict, fold: int, resume: str = None):
         bone_threshold  = lc["bone_threshold"],
         aux_weights     = lc.get("aux_weights",     [0.5, 0.25]),
         perc_max_slices = lc.get("perc_max_slices", 16),
-    )
+    ).to(device)   # moves VGG buffers (_mean, _std) and frozen weights to GPU
 
     _GradScaler = getattr(torch.amp, "GradScaler", torch.cuda.amp.GradScaler)
     scaler      = _GradScaler("cuda", enabled=(device.type == "cuda"))

@@ -35,7 +35,7 @@ model:
   name:         "ddpm"
   in_channels:  2              # MR (1ch) + noisy CT (1ch)
   out_channels: 1              # predicted noise
-  base_ch:      64
+  base_ch:      64             # requires A100 80GB GPU (see K8s job)
   ch_mult:      [1, 2, 4, 8]  # channels: 64, 128, 256, 512
   num_res:      2              # ResBlocks per encoder/decoder level
   attn_levels:  [3]            # self-attention only at deepest level (512ch)
