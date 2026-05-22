@@ -1,0 +1,80 @@
+# ============================================================
+# SynthRAD2025 Task 1 — 2D Conditional DDPM
+#
+# Conditioning: MR slice concatenated channel-wise with noisy CT.
+# Noise schedule: cosine (Nichol & Dhariwal 2021), T=1000.
+# Parameterisation: epsilon (predict noise).
+# Inference: DDIM deterministic sampler, 50 steps.
+# Anatomy conditioning: learned embedding summed into time embedding.
+#
+# Training: same 2D slice pipeline as baseline_unet2d.
+# Validation: DDIM on subset of val slices (10 steps for speed).
+# ============================================================
+
+experiment:
+  name: "ddpm"
+  fold: 0
+  seed: 42
+
+# ── Data ────────────────────────────────────────────────────
+data:
+  data_dirs:
+    - "/pvc/data/synthRAD2025_Task1_Train/Task1"
+    - "/pvc/data/synthRAD2025_Task1_Train_D/Task1"
+
+  folds_csv:         "/pvc/data/splits/folds.csv"
+  slice_axis:        0              # axial
+  pad_to:            [512, 512]
+  skip_empty_slices: true
+  empty_threshold:   0.01
+  num_workers:       8
+  pin_memory:        true
+
+# ── Model ───────────────────────────────────────────────────
+model:
+  name:         "ddpm"
+  in_channels:  2              # MR (1ch) + noisy CT (1ch)
+  out_channels: 1              # predicted noise
+  base_ch:      64
+  ch_mult:      [1, 2, 4, 8]  # channels: 64, 128, 256, 512
+  num_res:      2              # ResBlocks per encoder/decoder level
+  attn_levels:  [3]            # self-attention only at deepest level (512ch)
+  time_emb_dim: 256
+  n_anatomy:    3
+  dropout:      0.0
+
+# ── Diffusion ────────────────────────────────────────────────
+diffusion:
+  T:   1000                   # training timesteps
+  s:   0.008                  # cosine schedule offset
+
+# ── Training ────────────────────────────────────────────────
+training:
+  epochs:               200
+  batch_size:           16
+  val_every_n_epochs:   5
+  save_every_n_epochs:  10
+  # Quick val uses fewer DDIM steps to stay within budget
+  val_ddim_steps:       10
+  # Full inference DDIM steps (used for final evaluation)
+  infer_ddim_steps:     50
+  # Fraction of val slices to sample for quick validation (saves time)
+  val_slice_fraction:   0.05   # ~5% of val slices (~few hundred)
+
+# ── Optimiser ───────────────────────────────────────────────
+optimizer:
+  name:         "adamw"
+  lr:           1.0e-4
+  weight_decay: 1.0e-5
+  betas:        [0.9, 0.999]
+
+# ── Scheduler ───────────────────────────────────────────────
+scheduler:
+  name:    "cosine"
+  T_max:   200
+  eta_min: 1.0e-6
+
+# ── Output ──────────────────────────────────────────────────
+output:
+  checkpoint_dir: "/pvc/checkpoints/ddpm"
+  save_best:      true

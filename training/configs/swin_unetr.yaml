@@ -60,8 +60,10 @@ model:
 loss:
   w_mae:          1.0
   w_gdl:          0.5               # gradient difference — sharpens boundaries
+  w_perc:         0.1               # VGG16 AFP perceptual — improves Dice/HD95
   bone_weight:    2.5               # upweight voxels > bone_threshold
   bone_threshold: -0.4              # HU 200 ≈ -0.4 in [-1,1] normalised space
+  perc_max_slices: 16               # random axial slices sampled per 3D patch
 
 # ── Training ────────────────────────────────────────────────
 training:
@@ -90,7 +92,7 @@ scheduler:
 inference:
   roi_size:      [64, 128, 128]
   sw_batch_size: 4
-  overlap:       0.5
+  overlap:       0.75             # increased from 0.5 — reduces stitching artifacts
   mode:          "gaussian"       # Gaussian weighting over overlapping windows
 
 # ── Output ──────────────────────────────────────────────────

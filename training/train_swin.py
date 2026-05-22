@@ -51,7 +51,7 @@ from src.dataset import (
     normalise_mr,
     ANATOMY_TO_IDX,
 )
-from src.losses import MAELoss, GradientDifferenceLoss
+from src.losses import MAELoss, GradientDifferenceLoss, PerceptualLoss
 from src.metrics import compute_mae, compute_psnr, compute_ms_ssim
 from src.models.swin_unetr import SwinUNETR3D
 
@@ -121,23 +121,34 @@ def build_train_transforms():
 
 class SwinLoss(nn.Module):
     """
-    3D training loss: bone-weighted MAE + Gradient Difference Loss.
-    Both losses are intrinsically 3D-compatible.
+    3D training loss: bone-weighted MAE + GDL + VGG16 perceptual (AFP-style).
+
+    w_perc > 0 enforces anatomical structure fidelity — key fix for poor
+    Dice/HD95 from pure MAE-trained 3D models.
     """
 
-    def __init__(self, w_mae=1.0, w_gdl=0.5, bone_weight=2.5, bone_threshold=-0.4):
+    def __init__(
+        self,
+        w_mae=1.0, w_gdl=0.5, w_perc=0.0,
+        bone_weight=2.5, bone_threshold=-0.4,
+        perc_max_slices=16,
+    ):
         super().__init__()
-        self.w_mae = w_mae
-        self.w_gdl = w_gdl
-        self.mae   = MAELoss(bone_weight=bone_weight, bone_threshold=bone_threshold)
-        self.gdl   = GradientDifferenceLoss()
+        self.w_mae  = w_mae
+        self.w_gdl  = w_gdl
+        self.w_perc = w_perc
+        self.mae    = MAELoss(bone_weight=bone_weight, bone_threshold=bone_threshold)
+        self.gdl    = GradientDifferenceLoss()
+        self.perc   = PerceptualLoss(max_2d_slices=perc_max_slices) if w_perc > 0 else None
 
     def forward(self, pred, target, mask=None):
         losses = {}
         if self.w_mae > 0:
-            losses["mae"] = self.w_mae * self.mae(pred, target, mask)
+            losses["mae"]  = self.w_mae  * self.mae(pred, target, mask)
         if self.w_gdl > 0:
-            losses["gdl"] = self.w_gdl * self.gdl(pred, target, mask)
+            losses["gdl"]  = self.w_gdl  * self.gdl(pred, target, mask)
+        if self.w_perc > 0 and self.perc is not None:
+            losses["perc"] = self.w_perc * self.perc(pred, target, mask)
         losses["total"] = sum(losses.values())
         return losses
 
@@ -492,10 +503,12 @@ def train(cfg: dict, fold: int, resume: str = None):
 
     lc = cfg["loss"]
     criterion = SwinLoss(
-        w_mae          = lc["w_mae"],
-        w_gdl          = lc["w_gdl"],
-        bone_weight    = lc.get("bone_weight",    1.0),
-        bone_threshold = lc.get("bone_threshold", -0.4),
+        w_mae           = lc["w_mae"],
+        w_gdl           = lc["w_gdl"],
+        w_perc          = lc.get("w_perc",          0.0),
+        bone_weight     = lc.get("bone_weight",     1.0),
+        bone_threshold  = lc.get("bone_threshold",  -0.4),
+        perc_max_slices = lc.get("perc_max_slices", 16),
     )
 
     _GradScaler = getattr(torch.amp, "GradScaler", torch.cuda.amp.GradScaler)

@@ -4,9 +4,9 @@ Loss functions for SynthRAD2025 Task 1 sCT synthesis.
 Provides:
   - MAELoss              — direct optimisation target (eval metric)
   - MSSSIMLoss           — perceptual structural loss
-  - CombinedLoss         — weighted MAE + MS-SSIM (default training loss)
+  - CombinedLoss         — weighted MAE + MS-SSIM + GDL + Perceptual
   - GradientDifferenceLoss — edge sharpness (optional regulariser)
-  - PerceptualLoss       — VGG feature matching (optional)
+  - PerceptualLoss       — VGG16 feature matching (AFP-style, optional)
 """
 
 from __future__ import annotations
@@ -219,11 +219,17 @@ class GradientDifferenceLoss(nn.Module):
 class CombinedLoss(nn.Module):
     """
     Training loss:
-        L = w_mae * BoneWeightedMAE + w_ssim * (1 - MS-SSIM) + w_gdl * GDL
+        L = w_mae * BoneWeightedMAE
+          + w_ssim * (1 - MS-SSIM)
+          + w_gdl  * GDL
+          + w_perc * PerceptualLoss (VGG16 AFP-style)
 
     All terms are restricted to the body mask when mask is provided.
     bone_weight > 1.0 upweights voxels above bone_threshold in normalised CT space
     (HU 200 ≈ -0.4 with our [-1000, 3000] clip).
+
+    Perceptual loss (w_perc > 0) significantly improves Dice and HD95 by
+    enforcing anatomically correct structures — the key fix for 3D MONAI models.
     """
 
     def __init__(
@@ -231,18 +237,26 @@ class CombinedLoss(nn.Module):
         w_mae:          float = 1.0,
         w_ssim:         float = 1.0,
         w_gdl:          float = 0.0,
+        w_perc:         float = 0.0,
         ms_ssim_levels: int   = 5,
         bone_weight:    float = 1.0,
         bone_threshold: float = -0.4,
+        perc_max_slices: int  = 16,
     ):
         super().__init__()
         self.w_mae  = w_mae
         self.w_ssim = w_ssim
         self.w_gdl  = w_gdl
+        self.w_perc = w_perc
 
         self.mae_loss  = MAELoss(bone_weight=bone_weight, bone_threshold=bone_threshold)
         self.ssim_loss = MSSSIMLoss(levels=ms_ssim_levels)
         self.gdl_loss  = GradientDifferenceLoss()
+
+        if w_perc > 0:
+            self.perc_loss = PerceptualLoss(max_2d_slices=perc_max_slices)
+        else:
+            self.perc_loss = None
 
     def forward(
         self,
@@ -258,9 +272,117 @@ class CombinedLoss(nn.Module):
             losses["ssim"] = self.w_ssim * self.ssim_loss(pred, target, mask)
         if self.w_gdl > 0:
             losses["gdl"]  = self.w_gdl  * self.gdl_loss(pred, target, mask)
+        if self.w_perc > 0 and self.perc_loss is not None:
+            losses["perc"] = self.w_perc * self.perc_loss(pred, target, mask)
 
         losses["total"] = sum(losses.values())
         return losses
+
+
+# ── Perceptual Loss (VGG16 AFP-style) ─────────────────────────────────────────
+
+class PerceptualLoss(nn.Module):
+    """
+    VGG16 perceptual / feature-matching loss (AFP-style).
+
+    Extracts multi-scale features from relu1_2, relu2_2, relu3_3, relu4_3
+    and computes L1 distance between prediction and target feature maps.
+
+    Inputs are expected in [-1, 1] (normalised CT space); they are
+    re-scaled to [0, 1] and replicated to 3 channels for VGG.
+
+    Works on both 2D (B, 1, H, W) and 3D (B, 1, D, H, W) inputs.
+    For 3D, up to `max_2d_slices` axial slices are randomly sampled to
+    limit GPU cost (VGG is 2-D).
+
+    All VGG parameters are frozen; gradients only flow through `pred`.
+    """
+
+    # VGG16 relu1_2, relu2_2, relu3_3, relu4_3 (0-based indices in .features)
+    _SLICE_ENDS = [3, 8, 15, 22]
+    # ImageNet statistics (after mapping [-1,1] → [0,1] and 1-ch → 3-ch)
+    _MEAN = (0.485, 0.456, 0.406)
+    _STD  = (0.229, 0.224, 0.225)
+
+    def __init__(
+        self,
+        layer_weights: tuple = (0.25, 0.25, 0.25, 0.25),
+        max_2d_slices: int   = 16,
+    ):
+        super().__init__()
+        try:
+            from torchvision.models import vgg16, VGG16_Weights
+            feat = vgg16(weights=VGG16_Weights.IMAGENET1K_V1).features.eval()
+        except Exception as exc:
+            raise RuntimeError(
+                "PerceptualLoss requires torchvision with VGG16 weights. "
+                f"Original error: {exc}"
+            )
+
+        # Split VGG features into sequential slices between target layers
+        self.slices = nn.ModuleList()
+        prev = 0
+        for end in self._SLICE_ENDS:
+            self.slices.append(nn.Sequential(*list(feat.children())[prev : end + 1]))
+            prev = end + 1
+
+        for p in self.parameters():
+            p.requires_grad_(False)
+
+        assert len(layer_weights) == len(self.slices), "Need 4 layer weights"
+        self.layer_weights = layer_weights
+        self.max_2d_slices = max_2d_slices
+
+        mean = torch.tensor(self._MEAN).view(1, 3, 1, 1)
+        std  = torch.tensor(self._STD).view(1, 3, 1, 1)
+        self.register_buffer("_mean", mean)
+        self.register_buffer("_std",  std)
+
+    def _to_vgg(self, x: torch.Tensor) -> torch.Tensor:
+        """(B, 1, H, W) in [-1, 1] → (B, 3, H, W) ImageNet-normalised."""
+        x = (x.clamp(-1.0, 1.0) + 1.0) * 0.5      # → [0, 1]
+        x = x.expand(-1, 3, -1, -1)                 # broadcast to 3ch (no copy)
+        return (x - self._mean) / self._std
+
+    def forward(
+        self,
+        pred:   torch.Tensor,
+        target: torch.Tensor,
+        mask:   torch.Tensor = None,
+    ) -> torch.Tensor:
+        is_3d = pred.ndim == 5
+        if is_3d:
+            B, C, D, H, W = pred.shape
+            if D > self.max_2d_slices:
+                idx    = torch.randperm(D, device=pred.device)[: self.max_2d_slices]
+                pred   = pred  [:, :, idx]
+                target = target[:, :, idx]
+                mask   = mask  [:, :, idx] if mask is not None else None
+                D      = self.max_2d_slices
+            pred   = pred.permute(0, 2, 1, 3, 4).reshape(B * D, C, H, W)
+            target = target.permute(0, 2, 1, 3, 4).reshape(B * D, C, H, W)
+            if mask is not None:
+                mask = mask.permute(0, 2, 1, 3, 4).reshape(B * D, 1, H, W)
+
+        h_p = self._to_vgg(pred)
+        h_t = self._to_vgg(target.detach())
+
+        loss = pred.new_zeros(())
+        for w, vgg_slice in zip(self.layer_weights, self.slices):
+            h_p = vgg_slice(h_p)
+            with torch.no_grad():
+                h_t = vgg_slice(h_t)
+
+            if mask is not None:
+                m    = F.adaptive_avg_pool2d(mask.float(), h_p.shape[-2:]).gt(0.5).float()
+                diff = (h_p - h_t).abs()
+                term = (diff * m).sum() / (m.sum() * h_p.shape[1] + 1e-8)
+            else:
+                term = (h_p - h_t).abs().mean()
+
+            loss = loss + w * term
+
+        return loss
 
 
 # ── GAN Loss ────────────────────────────────────────────────────────────────────

@@ -48,8 +48,10 @@ model:
 loss:
   w_mae:          1.0
   w_gdl:          0.5
+  w_perc:         0.1               # VGG16 AFP perceptual — improves Dice/HD95
   bone_weight:    2.5
   bone_threshold: -0.4
+  perc_max_slices: 16
   # Deep supervision auxiliary loss weights (applied to downsampled targets)
   aux_weights:    [0.5, 0.25]
 
@@ -77,7 +79,7 @@ scheduler:
 inference:
   roi_size:      [64, 128, 128]
   sw_batch_size: 4
-  overlap:       0.5
+  overlap:       0.75             # increased from 0.5 — reduces stitching artifacts
   mode:          "gaussian"
 
 # ── Output ──────────────────────────────────────────────────

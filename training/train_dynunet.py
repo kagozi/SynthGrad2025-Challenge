@@ -46,7 +46,7 @@ from src.dataset import (
     normalise_mr,
     ANATOMY_TO_IDX,
 )
-from src.losses import MAELoss, GradientDifferenceLoss
+from src.losses import MAELoss, GradientDifferenceLoss, PerceptualLoss
 from src.metrics import compute_mae, compute_psnr, compute_ms_ssim
 from src.models.dynunet import DynUNETR3D
 
@@ -87,30 +87,38 @@ class DynLoss(torch.nn.Module):
     """
     3D training loss with deep supervision support.
 
-    Main output: bone-weighted MAE + GDL (full resolution)
-    Auxiliary outputs: bone-weighted MAE only (lower resolution)
-                       applied to bilinearly downsampled CT and mask targets.
+    Main output: bone-weighted MAE + GDL + perceptual (full resolution).
+    Auxiliary outputs: bone-weighted MAE only (lower resolution,
+                       applied to bilinearly downsampled CT and mask).
+
+    w_perc > 0 enables VGG16 AFP-style perceptual loss — the key fix for
+    poor Dice/HD95 from pure MAE-trained 3D models.
     """
 
     def __init__(
         self,
-        w_mae=1.0, w_gdl=0.5,
+        w_mae=1.0, w_gdl=0.5, w_perc=0.0,
         bone_weight=2.5, bone_threshold=-0.4,
         aux_weights=None,
+        perc_max_slices=16,
     ):
         super().__init__()
         self.w_mae       = w_mae
         self.w_gdl       = w_gdl
+        self.w_perc      = w_perc
         self.aux_weights = aux_weights or [0.5, 0.25]
         self.mae         = MAELoss(bone_weight=bone_weight, bone_threshold=bone_threshold)
         self.gdl         = GradientDifferenceLoss()
+        self.perc        = PerceptualLoss(max_2d_slices=perc_max_slices) if w_perc > 0 else None
 
     def _main_loss(self, pred, target, mask):
         losses = {}
         if self.w_mae > 0:
-            losses["mae"] = self.w_mae * self.mae(pred, target, mask)
+            losses["mae"]  = self.w_mae  * self.mae(pred, target, mask)
         if self.w_gdl > 0:
-            losses["gdl"] = self.w_gdl * self.gdl(pred, target, mask)
+            losses["gdl"]  = self.w_gdl  * self.gdl(pred, target, mask)
+        if self.w_perc > 0 and self.perc is not None:
+            losses["perc"] = self.w_perc * self.perc(pred, target, mask)
         losses["total"] = sum(losses.values())
         return losses
 
@@ -120,7 +128,6 @@ class DynLoss(torch.nn.Module):
         if aux_preds:
             aux_total = torch.zeros(1, device=pred.device)
             for w, aux in zip(self.aux_weights, aux_preds):
-                # Downsample CT and mask to match auxiliary output resolution
                 ct_ds   = F.interpolate(
                     target, size=aux.shape[2:], mode="trilinear", align_corners=False
                 )
@@ -384,11 +391,13 @@ def train(cfg: dict, fold: int, resume: str = None):
 
     lc = cfg["loss"]
     criterion = DynLoss(
-        w_mae          = lc["w_mae"],
-        w_gdl          = lc["w_gdl"],
-        bone_weight    = lc["bone_weight"],
-        bone_threshold = lc["bone_threshold"],
-        aux_weights    = lc.get("aux_weights", [0.5, 0.25]),
+        w_mae           = lc["w_mae"],
+        w_gdl           = lc["w_gdl"],
+        w_perc          = lc.get("w_perc",          0.0),
+        bone_weight     = lc["bone_weight"],
+        bone_threshold  = lc["bone_threshold"],
+        aux_weights     = lc.get("aux_weights",     [0.5, 0.25]),
+        perc_max_slices = lc.get("perc_max_slices", 16),
     )
 
     _GradScaler = getattr(torch.amp, "GradScaler", torch.cuda.amp.GradScaler)
