@@ -7,9 +7,14 @@ Provides:
   - CombinedLoss         — weighted MAE + MS-SSIM + GDL + Perceptual
   - GradientDifferenceLoss — edge sharpness (optional regulariser)
   - PerceptualLoss       — VGG16 feature matching (AFP-style, optional)
+  - TotalSegmentatorAFP  — CT-domain AFP via nnU-Net v2 ResidualEncoder (KoalAI-style)
 """
 
 from __future__ import annotations
+
+import contextlib
+import warnings
+from pathlib import Path
 
 import torch
 import torch.nn as nn
@@ -222,7 +227,7 @@ class CombinedLoss(nn.Module):
         L = w_mae * BoneWeightedMAE
           + w_ssim * (1 - MS-SSIM)
           + w_gdl  * GDL
-          + w_perc * PerceptualLoss (VGG16 AFP-style)
+          + w_perc * AFP (VGG16 or TotalSegmentator, see afp_type)
 
     All terms are restricted to the body mask when mask is provided.
     bone_weight > 1.0 upweights voxels above bone_threshold in normalised CT space
@@ -230,18 +235,21 @@ class CombinedLoss(nn.Module):
 
     Perceptual loss (w_perc > 0) significantly improves Dice and HD95 by
     enforcing anatomically correct structures — the key fix for 3D MONAI models.
+    afp_type="totalseg" uses CT-domain features (KoalAI-style); "vgg" uses VGG16.
     """
 
     def __init__(
         self,
-        w_mae:          float = 1.0,
-        w_ssim:         float = 1.0,
-        w_gdl:          float = 0.0,
-        w_perc:         float = 0.0,
-        ms_ssim_levels: int   = 5,
-        bone_weight:    float = 1.0,
-        bone_threshold: float = -0.4,
-        perc_max_slices: int  = 16,
+        w_mae:           float = 1.0,
+        w_ssim:          float = 1.0,
+        w_gdl:           float = 0.0,
+        w_perc:          float = 0.0,
+        ms_ssim_levels:  int   = 5,
+        bone_weight:     float = 1.0,
+        bone_threshold:  float = -0.4,
+        perc_max_slices: int   = 16,
+        afp_type:        str   = "vgg",   # "vgg" | "totalseg"
+        afp_weights_dir: str   = None,
     ):
         super().__init__()
         self.w_mae  = w_mae
@@ -254,7 +262,13 @@ class CombinedLoss(nn.Module):
         self.gdl_loss  = GradientDifferenceLoss()
 
         if w_perc > 0:
-            self.perc_loss = PerceptualLoss(max_2d_slices=perc_max_slices)
+            if afp_type == "totalseg":
+                self.perc_loss = TotalSegmentatorAFP(
+                    weights_dir   = afp_weights_dir,
+                    max_2d_slices = perc_max_slices,
+                )
+            else:
+                self.perc_loss = PerceptualLoss(max_2d_slices=perc_max_slices)
         else:
             self.perc_loss = None
 
@@ -380,6 +394,177 @@ class PerceptualLoss(nn.Module):
             else:
                 term = (h_p - h_t).abs().mean()
 
+            loss = loss + w * term
+
+        return loss
+
+
+# ── TotalSegmentator AFP Loss ──────────────────────────────────────────────────
+
+class TotalSegmentatorAFP(nn.Module):
+    """
+    Anatomy Feature Preservation (AFP) loss via TotalSegmentator v2.
+
+    Extracts multi-scale features from a pretrained 104-structure CT
+    segmentation network (nnU-Net v2 ResidualEncoder) and penalises L1
+    distance between predicted and target feature maps.
+
+    CT-domain features directly target the anatomical accuracy metrics used in
+    SynthRAD2025 evaluation (Dice, HD95), outperforming VGG16 which was never
+    trained on medical images.  This is the KoalAI 1st-place approach.
+
+    Inputs: [-1, 1] normalised CT (clip −1000…3000 HU).
+    Supports 2D (B,1,H,W) and 3D (B,1,D,H,W) inputs.
+    Falls back to VGG16 PerceptualLoss if TotalSegmentator / nnunetv2 is
+    not installed or weights are not found.
+
+    Weight paths searched in order:
+      1. weights_dir constructor argument
+      2. /pvc/pretrained/totalsegmentator/nnunet/results  (K8s PVC)
+      3. ~/.totalsegmentator/nnunet/results               (local install)
+    """
+
+    _ROOTS = [
+        "/pvc/pretrained/totalsegmentator/nnunet/results",
+        "~/.totalsegmentator/nnunet/results",
+    ]
+    _DATASETS = [
+        "Dataset291_TotalSegmentator_part1_organs_1559subj",
+        "Dataset291_TotalSegmentator_part1_organs",
+        "Dataset291",
+    ]
+    _TRAINER = "nnUNetTrainer__nnUNetPlans__3d_fullres"
+
+    def __init__(
+        self,
+        weights_dir:   "str | None" = None,
+        n_stages:      int          = 4,
+        layer_weights: tuple        = (0.25, 0.25, 0.25, 0.25),
+        max_2d_slices: int          = 16,
+    ):
+        super().__init__()
+        self.n_stages      = n_stages
+        self.layer_weights = tuple(layer_weights)
+        self.max_2d_slices = max_2d_slices
+
+        enc = self._try_load(weights_dir)
+        if enc is None:
+            warnings.warn(
+                "TotalSegmentatorAFP: weights not found or nnunetv2 not installed — "
+                "falling back to VGG16 PerceptualLoss.",
+                RuntimeWarning, stacklevel=2,
+            )
+            self._fallback = PerceptualLoss(max_2d_slices=max_2d_slices)
+            self.encoder   = None
+        else:
+            self._fallback = None
+            self.encoder   = enc
+            for p in self.encoder.parameters():
+                p.requires_grad_(False)
+            self.encoder.eval()
+
+    # ── weight loading ──────────────────────────────────────────────────────────
+
+    def _try_load(self, extra_dir: "str | None") -> "nn.Module | None":
+        try:
+            from nnunetv2.inference.predict_from_raw_data import nnUNetPredictor
+        except ImportError:
+            return None
+
+        roots = ([Path(extra_dir).expanduser()] if extra_dir else []) + \
+                [Path(r).expanduser() for r in self._ROOTS]
+
+        for root in roots:
+            for ds in self._DATASETS:
+                model_dir = root / ds / self._TRAINER
+                if not model_dir.is_dir():
+                    continue
+                with contextlib.suppress(Exception):
+                    pred = nnUNetPredictor(
+                        tile_step_size=0.5,
+                        use_gaussian=False,
+                        use_mirroring=False,
+                        perform_everything_on_device=False,
+                        device=torch.device("cpu"),
+                        verbose=False,
+                    )
+                    pred.initialize_from_trained_model_folder(
+                        str(model_dir),
+                        use_folds=(0,),
+                        checkpoint_name="checkpoint_final.pth",
+                    )
+                    enc = pred.network.encoder
+                    enc.eval()
+                    return enc
+        return None
+
+    # ── feature extraction ──────────────────────────────────────────────────────
+
+    def _get_stages(self) -> "list[nn.Module]":
+        for attr in ("stages", "encoders", "encoder_stages"):
+            if hasattr(self.encoder, attr):
+                return list(getattr(self.encoder, attr))
+        return list(self.encoder.children())
+
+    def _extract(self, x: torch.Tensor) -> "list[torch.Tensor]":
+        feats: list = []
+        handles = []
+        for stage in self._get_stages()[: self.n_stages]:
+            def _hook(_, _i, out, _f=feats):
+                _f.append(out[0] if isinstance(out, (list, tuple)) else out)
+            handles.append(stage.register_forward_hook(_hook))
+        try:
+            self.encoder(x)
+        finally:
+            for h in handles:
+                h.remove()
+        return feats
+
+    # ── normalisation ───────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _to_nnunet(x: torch.Tensor) -> torch.Tensor:
+        """[-1, 1] → approximate nnU-Net z-score (CT mean ≈ 100 HU, std ≈ 350 HU)."""
+        hu = (x.clamp(-1.0, 1.0) + 1.0) * 2000.0 - 1000.0   # → HU  (clip -1000…3000)
+        return (hu - 100.0) / 350.0
+
+    # ── forward ─────────────────────────────────────────────────────────────────
+
+    def forward(
+        self,
+        pred:   torch.Tensor,
+        target: torch.Tensor,
+        mask:   torch.Tensor = None,
+    ) -> torch.Tensor:
+        if self._fallback is not None:
+            return self._fallback(pred, target, mask)
+
+        # Promote 2D → 3D (treat H×W as 1×H×W depth)
+        if pred.ndim == 4:
+            pred   = pred.unsqueeze(2)
+            target = target.unsqueeze(2)
+            mask   = mask.unsqueeze(2) if mask is not None else None
+
+        xp = self._to_nnunet(pred)
+        xt = self._to_nnunet(target)
+
+        fp = self._extract(xp)
+        with torch.no_grad():
+            ft = self._extract(xt)
+
+        if not fp:
+            warnings.warn("TotalSegmentatorAFP: encoder returned no features; using raw L1.",
+                          RuntimeWarning, stacklevel=2)
+            return (pred - target.detach()).abs().mean()
+
+        loss = pred.new_zeros(())
+        for i, (a, b) in enumerate(zip(fp, ft)):
+            w = self.layer_weights[i] if i < len(self.layer_weights) else 1.0 / len(fp)
+            if mask is not None:
+                m    = F.adaptive_avg_pool3d(mask.float(), a.shape[-3:]).gt(0.5).float()
+                term = ((a - b.detach()).abs() * m).sum() / (m.sum() * a.shape[1] + 1e-8)
+            else:
+                term = (a - b.detach()).abs().mean()
             loss = loss + w * term
 
         return loss

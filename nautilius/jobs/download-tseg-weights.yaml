@@ -1,0 +1,80 @@
+# =============================================================================
+# Download TotalSegmentator v2 weights to PVC
+#
+# Must run ONCE before the per-anatomy training jobs.
+# Saves weights to: /pvc/pretrained/totalsegmentator/nnunet/results/
+#
+#   kubectl apply -f nautilius/jobs/download-tseg-weights.yaml
+#   kubectl logs -f job/synthrad2025-download-tseg
+# =============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: synthrad2025-download-tseg
+spec:
+  backoffLimit: 2
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: downloader
+          image: ghcr.io/kagozi/synthrad2025-train:latest
+          imagePullPolicy: Always
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -e
+              pip install TotalSegmentator --quiet
+              export TOTALSEG_WEIGHTS_PATH=/pvc/pretrained/totalsegmentator
+              mkdir -p "$TOTALSEG_WEIGHTS_PATH"
+              # Download Task 291 (part1 organs, 104 structures) — the model used for AFP
+              python -c "
+              from totalsegmentator.python_api import totalsegmentator
+              import numpy as np, SimpleITK as sitk, tempfile, os
+
+              # Dummy inference to trigger weight download
+              arr = np.zeros((50, 50, 50), dtype=np.int16)
+              img = sitk.GetImageFromArray(arr)
+              with tempfile.TemporaryDirectory() as tmp:
+                  sitk.WriteImage(img, os.path.join(tmp, 'ct.nii.gz'))
+                  try:
+                      totalsegmentator(
+                          os.path.join(tmp, 'ct.nii.gz'),
+                          os.path.join(tmp, 'seg'),
+                          task='total',
+                          fast=False,
+                          quiet=True,
+                      )
+                  except Exception as e:
+                      print(f'Expected error from dummy input: {e}')
+              print('TotalSegmentator weights downloaded.')
+              "
+              # Copy weights to PVC path expected by TotalSegmentatorAFP
+              SRC=~/.totalsegmentator/nnunet/results
+              DST=/pvc/pretrained/totalsegmentator/nnunet/results
+              mkdir -p "$DST"
+              cp -r "$SRC"/. "$DST"/
+              echo "Weights copied to $DST"
+              ls "$DST"
+
+          env:
+            - name: TOTALSEG_WEIGHTS_PATH
+              value: "/pvc/pretrained/totalsegmentator"
+
+          resources:
+            requests:
+              memory: "8Gi"
+              cpu: "2"
+            limits:
+              memory: "10Gi"
+              cpu: "4"
+
+          volumeMounts:
+            - name: synthrad2025-vol
+              mountPath: /pvc
+
+      volumes:
+        - name: synthrad2025-vol
+          persistentVolumeClaim:
+            claimName: synthrad2025-pvc

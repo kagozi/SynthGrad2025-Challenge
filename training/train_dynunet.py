@@ -46,7 +46,7 @@ from src.dataset import (
     normalise_mr,
     ANATOMY_TO_IDX,
 )
-from src.losses import MAELoss, GradientDifferenceLoss, PerceptualLoss
+from src.losses import MAELoss, GradientDifferenceLoss, PerceptualLoss, TotalSegmentatorAFP
 from src.metrics import compute_mae, compute_psnr, compute_ms_ssim
 from src.models.dynunet import DynUNETR3D
 
@@ -87,12 +87,12 @@ class DynLoss(torch.nn.Module):
     """
     3D training loss with deep supervision support.
 
-    Main output: bone-weighted MAE + GDL + perceptual (full resolution).
-    Auxiliary outputs: bone-weighted MAE only (lower resolution,
-                       applied to bilinearly downsampled CT and mask).
+    Main output: bone-weighted MAE + GDL + AFP perceptual (full resolution).
+    Auxiliary outputs: bone-weighted MAE only (lower resolution).
 
-    w_perc > 0 enables VGG16 AFP-style perceptual loss — the key fix for
-    poor Dice/HD95 from pure MAE-trained 3D models.
+    w_perc > 0 enables AFP perceptual loss.
+    afp_type="vgg"      — VGG16 features (ImageNet)
+    afp_type="totalseg" — TotalSegmentator nnU-Net v2 features (CT-domain, KoalAI-style)
     """
 
     def __init__(
@@ -101,6 +101,8 @@ class DynLoss(torch.nn.Module):
         bone_weight=2.5, bone_threshold=-0.4,
         aux_weights=None,
         perc_max_slices=16,
+        afp_type="vgg",
+        afp_weights_dir=None,
     ):
         super().__init__()
         self.w_mae       = w_mae
@@ -109,7 +111,16 @@ class DynLoss(torch.nn.Module):
         self.aux_weights = aux_weights or [0.5, 0.25]
         self.mae         = MAELoss(bone_weight=bone_weight, bone_threshold=bone_threshold)
         self.gdl         = GradientDifferenceLoss()
-        self.perc        = PerceptualLoss(max_2d_slices=perc_max_slices) if w_perc > 0 else None
+        if w_perc > 0:
+            if afp_type == "totalseg":
+                self.perc = TotalSegmentatorAFP(
+                    weights_dir=afp_weights_dir,
+                    max_2d_slices=perc_max_slices,
+                )
+            else:
+                self.perc = PerceptualLoss(max_2d_slices=perc_max_slices)
+        else:
+            self.perc = None
 
     def _main_loss(self, pred, target, mask):
         losses = {}
@@ -139,6 +150,19 @@ class DynLoss(torch.nn.Module):
             losses["total"] = losses["total"] + losses["aux"]
 
         return losses
+
+
+# ── Polynomial LR Scheduler ───────────────────────────────────────────────────
+
+class PolyLRScheduler(torch.optim.lr_scheduler.LambdaLR):
+    """lr * (1 - epoch/max_epochs)^0.9  — nnU-Net default decay."""
+    def __init__(self, optimizer, max_epochs, exponent=0.9, last_epoch=-1):
+        self._max_epochs = max_epochs
+        self._exponent   = exponent
+        super().__init__(optimizer, lr_lambda=self._fn, last_epoch=last_epoch)
+
+    def _fn(self, epoch):
+        return (1.0 - min(epoch, self._max_epochs - 1) / self._max_epochs) ** self._exponent
 
 
 # ── Model factory ──────────────────────────────────────────────────────────────
@@ -317,7 +341,7 @@ def _log_sample_images(sample_volumes, epoch, n_slices=3):
 
 # ── Training loop ──────────────────────────────────────────────────────────────
 
-def train(cfg: dict, fold: int, resume: str = None):
+def train(cfg: dict, fold: int, resume: str = None, finetune_from: str = None):
     seed_everything(cfg["experiment"]["seed"])
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[Train] Device: {device}  |  Fold: {fold}")
@@ -337,6 +361,10 @@ def train(cfg: dict, fold: int, resume: str = None):
     # ── Data ───────────────────────────────────────────────────────────────────
     dc        = cfg["data"]
     case_list = build_case_list(dc["data_dirs"])
+    anatomy_filter = dc.get("anatomy_filter", None)
+    if anatomy_filter:
+        case_list = [c for c in case_list if c["anatomy"] == anatomy_filter]
+        print(f"[Train] Anatomy filter: {anatomy_filter} → {len(case_list)} cases")
     fold_df   = pd.read_csv(dc["folds_csv"])
 
     patch_size = tuple(dc["patch_size"])
@@ -376,18 +404,35 @@ def train(cfg: dict, fold: int, resume: str = None):
     print(f"[Train] Model: DynUNETR3D ({n_params:.1f}M params)")
     wandb.config.update({"model_params_M": round(n_params, 1)})
 
-    oc        = cfg["optimizer"]
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr           = oc["lr"],
-        weight_decay = oc["weight_decay"],
-        betas        = tuple(oc["betas"]),
-    )
+    oc = cfg["optimizer"]
+    if oc.get("name", "adamw") == "sgd":
+        optimizer = torch.optim.SGD(
+            model.parameters(),
+            lr           = oc["lr"],
+            momentum     = oc.get("momentum", 0.99),
+            nesterov     = oc.get("nesterov", True),
+            weight_decay = oc.get("weight_decay", 3e-5),
+        )
+        print(f"[Train] Optimiser: SGD  lr={oc['lr']}  momentum={oc.get('momentum',0.99)}")
+    else:
+        optimizer = torch.optim.AdamW(
+            model.parameters(),
+            lr           = oc["lr"],
+            weight_decay = oc.get("weight_decay", 1e-5),
+            betas        = tuple(oc.get("betas", [0.9, 0.999])),
+        )
+        print(f"[Train] Optimiser: AdamW  lr={oc['lr']}")
 
     sc = cfg["scheduler"]
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=sc["T_max"], eta_min=sc["eta_min"]
-    )
+    if sc.get("name", "cosine") == "poly":
+        scheduler = PolyLRScheduler(
+            optimizer, max_epochs=sc.get("T_max", tc["epochs"])
+        )
+        print(f"[Train] Scheduler: PolyLR  max_epochs={sc.get('T_max', tc['epochs'])}")
+    else:
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=sc["T_max"], eta_min=sc.get("eta_min", 1e-6)
+        )
 
     lc = cfg["loss"]
     criterion = DynLoss(
@@ -398,7 +443,9 @@ def train(cfg: dict, fold: int, resume: str = None):
         bone_threshold  = lc["bone_threshold"],
         aux_weights     = lc.get("aux_weights",     [0.5, 0.25]),
         perc_max_slices = lc.get("perc_max_slices", 16),
-    ).to(device)   # moves VGG buffers (_mean, _std) and frozen weights to GPU
+        afp_type        = lc.get("afp_type",        "vgg"),
+        afp_weights_dir = lc.get("afp_weights_dir", None),
+    ).to(device)   # moves AFP encoder buffers / frozen weights to GPU
 
     _GradScaler = getattr(torch.amp, "GradScaler", torch.cuda.amp.GradScaler)
     scaler      = _GradScaler("cuda", enabled=(device.type == "cuda"))
@@ -406,7 +453,11 @@ def train(cfg: dict, fold: int, resume: str = None):
     start_epoch = 0
     best_mae    = float("inf")
 
-    if resume and Path(resume).exists():
+    if finetune_from and Path(finetune_from).exists():
+        ckpt = torch.load(finetune_from, map_location=device)
+        model.load_state_dict(ckpt["model"])
+        print(f"[Train] Fine-tuning from {finetune_from} (optimizer/epoch reset)")
+    elif resume and Path(resume).exists():
         ckpt = torch.load(resume, map_location=device)
         model.load_state_dict(ckpt["model"])
         optimizer.load_state_dict(ckpt["optimizer"])
@@ -423,7 +474,7 @@ def train(cfg: dict, fold: int, resume: str = None):
     # ── Main loop ──────────────────────────────────────────────────────────────
     for epoch in range(start_epoch, tc["epochs"]):
         model.train()
-        epoch_losses: dict[str, list] = {"total": [], "mae": [], "gdl": [], "aux": []}
+        epoch_losses: dict[str, list] = {"total": [], "mae": [], "gdl": [], "perc": [], "aux": []}
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1:03d}/{tc['epochs']}", leave=True)
         for batch in pbar:
@@ -449,7 +500,7 @@ def train(cfg: dict, fold: int, resume: str = None):
             scaler.step(optimizer)
             scaler.update()
 
-            for k in ["total", "mae", "gdl", "aux"]:
+            for k in ["total", "mae", "gdl", "perc", "aux"]:
                 if k in losses:
                     epoch_losses[k].append(losses[k].item())
 
@@ -519,11 +570,16 @@ def train(cfg: dict, fold: int, resume: str = None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config",     type=str, required=True)
-    parser.add_argument("--fold",       type=int, default=None)
-    parser.add_argument("--resume",     type=str, default=None)
-    parser.add_argument("--data_dirs",  type=str, nargs="+", default=None)
-    parser.add_argument("--output_dir", type=str, default=None)
+    parser.add_argument("--config",        type=str, required=True)
+    parser.add_argument("--fold",          type=int, default=None)
+    parser.add_argument("--resume",        type=str, default=None,
+                        help="Resume from checkpoint (restores optimizer + epoch)")
+    parser.add_argument("--finetune_from", type=str, default=None,
+                        help="Load model weights only; reset optimizer/epoch (fine-tuning)")
+    parser.add_argument("--anatomy",       type=str, default=None,
+                        help="Override data.anatomy_filter (HN | TH | AB)")
+    parser.add_argument("--data_dirs",     type=str, nargs="+", default=None)
+    parser.add_argument("--output_dir",    type=str, default=None)
     args = parser.parse_args()
 
     cfg  = load_config(args.config)
@@ -533,5 +589,7 @@ if __name__ == "__main__":
         cfg["data"]["data_dirs"] = args.data_dirs
     if args.output_dir:
         cfg["output"]["checkpoint_dir"] = args.output_dir
+    if args.anatomy:
+        cfg["data"]["anatomy_filter"] = args.anatomy
 
-    train(cfg, fold=fold, resume=args.resume)
+    train(cfg, fold=fold, resume=args.resume, finetune_from=args.finetune_from)

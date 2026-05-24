@@ -1,19 +1,19 @@
 # ============================================================
-# SynthRAD2025 Task 1 — DynUNet Stage 1: Multi-Anatomy Base
+# SynthRAD2025 Task 1 — DynUNet per-anatomy: Abdomen
 #
-# KoalAI two-stage approach:
-#   Stage 1 (this config): 1500 epochs on ALL anatomies.
-#                          Loss: MAE + GDL only (no AFP).
-#                          Produces fold0_best.pth … fold4_best.pth.
-#   Stage 2 (dynunet_HN/TH/AB.yaml): 500 epochs per-anatomy fine-tune
-#                          with TotalSegmentator AFP loss.
+# KoalAI-style training:
+#   - Anatomy-specific model (AB only, ~270 cases)
+#   - TotalSegmentator AFP loss (CT-domain feature matching)
+#   - SGD + polynomial LR decay (nnU-Net defaults)
+#   - 1000 epochs
 #
-# Optimiser: SGD + polynomial LR decay (nnU-Net defaults).
-# Architecture: DynUNETR3D with residual blocks + FiLM anatomy conditioning.
+# Two-stage workflow:
+#   Stage 1: train on all anatomies  (dynunet.yaml, fold0, 150 ep)
+#   Stage 2: fine-tune per anatomy   (this config, --finetune_from <stage1_best>)
 # ============================================================
 
 experiment:
-  name: "dynunet"
+  name: "dynunet_AB"
   fold: 0
   seed: 42
 
@@ -23,7 +23,8 @@ data:
     - "/pvc/data/synthRAD2025_Task1_Train/Task1"
     - "/pvc/data/synthRAD2025_Task1_Train_D/Task1"
 
-  folds_csv: "/pvc/data/splits/folds.csv"
+  folds_csv:       "/pvc/data/splits/folds.csv"
+  anatomy_filter:  "AB"        # train + val restricted to Abdomen
 
   patch_size:          [64, 128, 128]
   samples_per_volume:  8
@@ -47,20 +48,22 @@ model:
 
 # ── Loss ────────────────────────────────────────────────────
 loss:
-  w_mae:          1.0
-  w_gdl:          0.5
-  w_perc:         0.0            # no AFP in stage 1 — added in per-anatomy fine-tune
-  bone_weight:    2.5
-  bone_threshold: -0.4
+  w_mae:           1.0
+  w_gdl:           0.5
+  w_perc:          0.1
+  afp_type:        "totalseg"   # TotalSegmentator CT-domain features
+  afp_weights_dir: "/pvc/pretrained/totalsegmentator/nnunet/results"
+  bone_weight:     2.5
+  bone_threshold:  -0.4
   perc_max_slices: 16
-  aux_weights:    [0.5, 0.25]
+  aux_weights:     [0.5, 0.25]
 
 # ── Training ────────────────────────────────────────────────
 training:
-  epochs:               1500
+  epochs:               500
   batch_size:           2
-  val_every_n_epochs:   25
-  save_every_n_epochs:  100
+  val_every_n_epochs:   20
+  save_every_n_epochs:  50
 
 # ── Optimiser (nnU-Net defaults) ────────────────────────────
 optimizer:
@@ -73,7 +76,7 @@ optimizer:
 # ── Scheduler ───────────────────────────────────────────────
 scheduler:
   name:  "poly"
-  T_max: 1500         # must match training.epochs
+  T_max: 500
 
 # ── Sliding window inference ─────────────────────────────────
 inference:
@@ -84,5 +87,5 @@ inference:
 
 # ── Output ──────────────────────────────────────────────────
 output:
-  checkpoint_dir: "/pvc/checkpoints/dynunet"
+  checkpoint_dir: "/pvc/checkpoints/dynunet_AB"
   save_best:      true

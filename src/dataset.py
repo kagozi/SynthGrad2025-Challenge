@@ -46,21 +46,28 @@ def load_mha_with_meta(path: Path):
 
 # ── Normalisation ───────────────────────────────────────────────────────────────
 
-ANATOMY_MR_PERCENTILES = {
-    # Will be filled by running normalisation stats script;
-    # these are conservative fallbacks.
-    "HN": (0.0, 2500.0),
-    "TH": (0.0, 2500.0),
-    "AB": (0.0, 2500.0),
-}
 CT_CLIP = (-1000, 3000)   # HU range to clip before normalising
 
 
-def normalise_mr(arr: np.ndarray, anatomy: str) -> np.ndarray:
-    """Clip to [p1, p99] then scale to [0, 1]."""
-    lo, hi = ANATOMY_MR_PERCENTILES.get(anatomy, (0.0, 2500.0))
-    arr    = np.clip(arr, lo, hi)
-    arr    = (arr - lo) / (hi - lo + 1e-8)
+def normalise_mr(arr: np.ndarray, anatomy: str = None) -> np.ndarray:
+    """
+    Per-case z-score normalisation → [0, 1].
+
+    Computes mean/std from foreground voxels (arr > 0), clips extreme values
+    at ±3σ, then maps to [0, 1].  Handles the large intensity variation across
+    SynthRAD2025 field strengths (0.35T–3T, 5 centers) much better than a
+    fixed global clip.
+
+    The `anatomy` argument is kept for API compatibility but is no longer used.
+    """
+    fg = arr[arr > 0]
+    if fg.size == 0:
+        return np.zeros_like(arr)
+    mean = float(fg.mean())
+    std  = float(fg.std()) + 1e-8
+    arr  = (arr - mean) / std          # z-score
+    arr  = np.clip(arr, -3.0, 3.0)    # remove outliers beyond ±3σ
+    arr  = (arr + 3.0) / 6.0          # → [0, 1]
     return arr
 
 

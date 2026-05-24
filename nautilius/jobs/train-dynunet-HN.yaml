@@ -1,13 +1,16 @@
 # =============================================================================
-# Training Job — DDPM Fold 0
+# DynUNet Per-Anatomy Training — Head & Neck
 #
-#   kubectl apply -f nautilius/jobs/train-ddpm-fold0.yaml
-#   kubectl logs -f job/synthrad2025-ddpm-fold0
+# KoalAI-style: TotalSegmentator AFP, SGD/poly-LR, 1000 epochs.
+# Fine-tune from the fold0 multi-anatomy checkpoint (stage 2).
+#
+#   kubectl apply -f nautilius/jobs/train-dynunet-HN.yaml
+#   kubectl logs -f job/synthrad2025-dynunet-HN
 # =============================================================================
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: synthrad2025-ddpm-fold0
+  name: synthrad2025-dynunet-HN
 spec:
   backoffLimit: 0
   ttlSecondsAfterFinished: 86400
@@ -25,26 +28,26 @@ spec:
                 - k8s-chase-ci-10.calit2.optiputer.net
                 - k8s-haosu-02.sdsc.optiputer.net
                 - k8s-haosu-03.sdsc.optiputer.net
-              # A100 80GB required — base_ch=64/batch=16 at 512×512 needs ~40GB+
-              - key: nvidia.com/gpu.product
-                operator: In
+              - key: nvidia.com/gpu.compute.major
+                operator: Gt
                 values:
-                - NVIDIA-A100-SXM4-80GB
-                - NVIDIA-A100-80GB-PCIe
-                - NVIDIA-A100-PCIE-80GB
+                - "7"
       containers:
         - name: trainer
           image: ghcr.io/kagozi/synthrad2025-train:latest
           imagePullPolicy: Always
-          command: ["python", "training/train_ddpm.py"]
+          command: ["python", "training/train_dynunet.py"]
           args:
             - "--config"
-            - "training/configs/ddpm.yaml"
+            - "training/configs/dynunet_HN.yaml"
             - "--fold"
             - "0"
-            # Uncomment to resume:
+            # Fine-tune from multi-anatomy stage 1 best checkpoint:
+            - "--finetune_from"
+            - "/pvc/checkpoints/dynunet/fold0_best.pth"
+            # Uncomment to resume an interrupted HN fine-tune run:
             # - "--resume"
-            # - "/pvc/checkpoints/ddpm/fold0_last.pth"
+            # - "/pvc/checkpoints/dynunet_HN/fold0_last.pth"
 
           env:
             - name: WANDB_API_KEY
@@ -54,18 +57,18 @@ spec:
                   key: api-key
             - name: WANDB_PROJECT
               value: "synthrad2025-task1"
-            - name: PYTORCH_ALLOC_CONF
+            - name: PYTORCH_CUDA_ALLOC_CONF
               value: "expandable_segments:True"
 
           resources:
             requests:
-              memory: "48Gi"
-              cpu: "8"
-              nvidia.com/a100: "1"   # A100 nodes expose a100 resource, not generic gpu
+              memory: "28Gi"
+              cpu: "4"
+              nvidia.com/gpu: "1"
             limits:
-              memory: "57Gi"         # max 1.2× request per namespace policy
-              cpu: "8"
-              nvidia.com/a100: "1"
+              memory: "36Gi"
+              cpu: "6"
+              nvidia.com/gpu: "1"
 
           volumeMounts:
             - name: synthrad2025-vol
@@ -80,9 +83,9 @@ spec:
         - name: dshm
           emptyDir:
             medium: Memory
-            sizeLimit: 8Gi
+            sizeLimit: 16Gi
 
       tolerations:
-        - key: "nvidia.com/a100"
+        - key: "nvidia.com/gpu"
           operator: "Exists"
           effect: "NoSchedule"

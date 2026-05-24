@@ -5,11 +5,21 @@ SynthRAD2025 Task 1 — Grand Challenge submission entrypoint.
 Extends BaseSynthradAlgorithm from the official template:
   https://github.com/SynthRAD2025/algorithm-template
 
-Ensemble inference:
-  Loads all fold checkpoints found under /opt/ml/model/ and averages their
-  predictions at the logit level (before Tanh denormalisation).  The number
-  of folds and model architecture are auto-detected from each checkpoint's
-  saved config — so a mixed Swin+DynUNet ensemble works without code changes.
+Routing strategy (auto-detected from checkpoint filenames in /opt/ml/model/):
+
+  Per-anatomy mode  — checkpoint filename contains "HN", "TH", or "AB"
+    e.g. HN.pth, dynunet_TH.pth, AB_best.pth
+    → each anatomy gets its own model; no cross-anatomy averaging
+    → any anatomy without a tagged checkpoint falls back to untagged models
+
+  Ensemble mode (legacy / fallback) — checkpoints have no anatomy tag
+    e.g. fold0_best.pth, fold1_best.pth …
+    → all models averaged for every anatomy (original behaviour)
+
+  Mixed mode — some anatomies have tagged checkpoints, others don't
+    → tagged anatomy uses its own model; untagged anatomy uses untagged ensemble
+
+  Within each anatomy, multiple checkpoints are averaged (fold ensemble).
 
 I/O (handled by base class):
   Input MR   : /input/images/mri/<uuid>.mha
@@ -29,14 +39,10 @@ import torch.nn.functional as F
 
 sys.path.insert(0, "/opt/app")
 
-from src.dataset import ANATOMY_TO_IDX, denormalise_ct
+from src.dataset import ANATOMY_TO_IDX, denormalise_ct, normalise_mr
 from base_algorithm import BaseSynthradAlgorithm
 
 MODEL_DIR = Path("/opt/ml/model")
-
-# MR normalisation constants (must match training — src/dataset.py)
-MR_CLIP_LO = 0.0
-MR_CLIP_HI = 2500.0
 
 # Sliding-window inference settings (matched to training configs)
 SW_ROI_SIZE   = (64, 128, 128)   # (D, H, W) patch
@@ -100,8 +106,29 @@ class SynthradAlgorithm(BaseSynthradAlgorithm):
 
     # ── Model loading ──────────────────────────────────────────────────────────
 
+    def _load_one(self, path: Path) -> tuple:
+        """Load a single checkpoint; return (model, model_type_str)."""
+        print(f"[SynthradAlgorithm] Loading {path.name} …")
+        ckpt  = torch.load(str(path), map_location=self.device, weights_only=False)
+        cfg   = ckpt["config"]["model"]
+        model = _build_model(cfg)
+        model.load_state_dict(ckpt["model"])
+        model.eval().to(self.device)
+        mtype = "2d" if cfg["name"] in ("unet2d", "attention_unet2d") else "3d"
+        print(f"  → {cfg['name']} ({mtype}) loaded OK")
+        return model, mtype
+
     def _load_models(self):
-        """Load every *.pth checkpoint in MODEL_DIR as one ensemble member."""
+        """
+        Build per-anatomy model lists from MODEL_DIR/*.pth.
+
+        Filenames containing "HN", "TH", or "AB" (case-insensitive) are
+        assigned only to that anatomy.  Untagged checkpoints are assigned to
+        all three anatomies as a fallback ensemble.
+
+        self.anatomy_models["HN"] → list of models used for Head & Neck
+        self.anatomy_types["HN"]  → corresponding "2d"/"3d" strings
+        """
         ckpt_paths = sorted(MODEL_DIR.glob("*.pth"))
         if not ckpt_paths:
             raise FileNotFoundError(
@@ -109,24 +136,21 @@ class SynthradAlgorithm(BaseSynthradAlgorithm):
                 "Did you forget to bake weights into the Docker image?"
             )
 
-        self.models: List[torch.nn.Module] = []
-        self.model_types: List[str] = []   # "2d" or "3d" per model
+        self.anatomy_models: Dict[str, List[torch.nn.Module]] = {"HN": [], "TH": [], "AB": []}
+        self.anatomy_types:  Dict[str, List[str]]             = {"HN": [], "TH": [], "AB": []}
 
         for path in ckpt_paths:
-            print(f"[SynthradAlgorithm] Loading {path.name} …")
-            ckpt = torch.load(str(path), map_location=self.device, weights_only=False)
-            cfg  = ckpt["config"]["model"]
+            tagged = [a for a in ("HN", "TH", "AB") if a in path.stem.upper()]
+            targets = tagged if tagged else ["HN", "TH", "AB"]
+            model, mtype = self._load_one(path)
+            for anat in targets:
+                self.anatomy_models[anat].append(model)
+                self.anatomy_types[anat].append(mtype)
 
-            model = _build_model(cfg)
-            model.load_state_dict(ckpt["model"])
-            model.eval()
-            model.to(self.device)
-
-            self.models.append(model)
-            self.model_types.append("2d" if cfg["name"] in ("unet2d", "attention_unet2d") else "3d")
-            print(f"  → {cfg['name']} loaded OK")
-
-        print(f"[SynthradAlgorithm] Ensemble of {len(self.models)} model(s) ready.")
+        for anat in ("HN", "TH", "AB"):
+            n = len(self.anatomy_models[anat])
+            tag = "per-anatomy" if any(anat in p.stem.upper() for p in ckpt_paths) else "fallback"
+            print(f"[SynthradAlgorithm] {anat}: {n} model(s) [{tag}]")
 
     # ── Anatomy detection ──────────────────────────────────────────────────────
 
@@ -189,24 +213,22 @@ class SynthradAlgorithm(BaseSynthradAlgorithm):
         anatomy = self._detect_anatomy(region)
         print(f"[predict] anatomy={anatomy}")
 
-        # Normalise MR
+        # Normalise MR — per-case z-score (matches training, handles 0.35T–3T variation)
         mr_np = sitk.GetArrayFromImage(mr_sitk).astype(np.float32)
-        mr_np = np.clip(mr_np, MR_CLIP_LO, MR_CLIP_HI)
-        mr_np = (mr_np - MR_CLIP_LO) / (MR_CLIP_HI - MR_CLIP_LO + 1e-8)
+        mr_np = normalise_mr(mr_np, anatomy)
 
         anat_idx = torch.tensor([ANATOMY_TO_IDX[anatomy]], dtype=torch.long,
                                 device=self.device)
 
-        # Run each model and collect predictions (all in normalised [-1,1] space)
+        # Run anatomy-specific model(s) and average (ensemble within anatomy)
         preds = []
-        for model, mtype in zip(self.models, self.model_types):
+        for model, mtype in zip(self.anatomy_models[anatomy], self.anatomy_types[anatomy]):
             if mtype == "2d":
                 p = self._infer_2d(model, mr_np, anat_idx)
             else:
                 p = self._infer_3d(model, mr_np, anat_idx)
             preds.append(p)
 
-        # Average ensemble predictions (in normalised space, before HU conversion)
         pred_norm = np.mean(preds, axis=0)   # (D, H, W)
 
         # Denormalise to HU
