@@ -58,8 +58,8 @@ spec:
               cpu: "4"
               nvidia.com/gpu: "1"
             limits:
-              memory: "36Gi"
-              cpu: "6"
+              memory: "34Gi"
+              cpu: "5"
               nvidia.com/gpu: "1"
           volumeMounts:
             - name: synthrad2025-vol

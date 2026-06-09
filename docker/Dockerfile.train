@@ -19,13 +19,22 @@ LABEL org.opencontainers.image.description="SynthRAD2025 Task 1 training image"
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     libgomp1 \
+    wget \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Python deps ────────────────────────────────────────────────────────────────
 WORKDIR /app
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+
+# Install everything except nnunetv2/TotalSegmentator first to avoid resolver
+# spending time backtracking on the heavy nnU-Net dependency chain.
+RUN pip install --no-cache-dir $(grep -v -E "nnunetv2|TotalSegmentator" requirements.txt | tr '\n' ' ')
+
+# nnunetv2 pulls in batchgenerators, dynamic_network_architectures, acvl_utils.
+# Install separately so a version conflict here doesn't corrupt the base env.
+RUN pip install --no-cache-dir nnunetv2>=2.2
+RUN pip install --no-cache-dir TotalSegmentator>=2.3
 
 # ── Copy project source ────────────────────────────────────────────────────────
 COPY src/       /app/src/

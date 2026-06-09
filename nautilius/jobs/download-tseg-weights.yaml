@@ -1,7 +1,7 @@
 # =============================================================================
 # Download TotalSegmentator v2 weights to PVC
 #
-# Must run ONCE before the per-anatomy training jobs.
+# Must run ONCE before the per-anatomy fine-tune jobs (stage 2).
 # Saves weights to: /pvc/pretrained/totalsegmentator/nnunet/results/
 #
 #   kubectl apply -f nautilius/jobs/download-tseg-weights.yaml
@@ -25,50 +25,25 @@ spec:
           args:
             - |
               set -e
-              pip install TotalSegmentator --quiet
-              export TOTALSEG_WEIGHTS_PATH=/pvc/pretrained/totalsegmentator
-              mkdir -p "$TOTALSEG_WEIGHTS_PATH"
-              # Download Task 291 (part1 organs, 104 structures) — the model used for AFP
-              python -c "
-              from totalsegmentator.python_api import totalsegmentator
-              import numpy as np, SimpleITK as sitk, tempfile, os
+              echo "Downloading TotalSegmentator weights (task: total, 104 structures)..."
+              totalseg_download_weights -t total
 
-              # Dummy inference to trigger weight download
-              arr = np.zeros((50, 50, 50), dtype=np.int16)
-              img = sitk.GetImageFromArray(arr)
-              with tempfile.TemporaryDirectory() as tmp:
-                  sitk.WriteImage(img, os.path.join(tmp, 'ct.nii.gz'))
-                  try:
-                      totalsegmentator(
-                          os.path.join(tmp, 'ct.nii.gz'),
-                          os.path.join(tmp, 'seg'),
-                          task='total',
-                          fast=False,
-                          quiet=True,
-                      )
-                  except Exception as e:
-                      print(f'Expected error from dummy input: {e}')
-              print('TotalSegmentator weights downloaded.')
-              "
-              # Copy weights to PVC path expected by TotalSegmentatorAFP
-              SRC=~/.totalsegmentator/nnunet/results
-              DST=/pvc/pretrained/totalsegmentator/nnunet/results
+              echo "Copying weights to PVC..."
+              SRC="${HOME}/.totalsegmentator/nnunet/results"
+              DST="/pvc/pretrained/totalsegmentator/nnunet/results"
               mkdir -p "$DST"
               cp -r "$SRC"/. "$DST"/
-              echo "Weights copied to $DST"
-              ls "$DST"
 
-          env:
-            - name: TOTALSEG_WEIGHTS_PATH
-              value: "/pvc/pretrained/totalsegmentator"
+              echo "Done. Contents of $DST:"
+              ls "$DST"
 
           resources:
             requests:
-              memory: "8Gi"
+              memory: "4Gi"
               cpu: "2"
             limits:
-              memory: "10Gi"
-              cpu: "4"
+              memory: "4Gi"
+              cpu: "2"
 
           volumeMounts:
             - name: synthrad2025-vol
