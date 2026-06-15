@@ -433,7 +433,7 @@ class TotalSegmentatorAFP(nn.Module):
         "Dataset291_TotalSegmentator_part1_organs",
         "Dataset291",
     ]
-    _TRAINER = "nnUNetTrainer__nnUNetPlans__3d_fullres"
+    _TRAINER = "nnUNetTrainerNoMirroring__nnUNetPlans__3d_fullres"
 
     def __init__(
         self,
