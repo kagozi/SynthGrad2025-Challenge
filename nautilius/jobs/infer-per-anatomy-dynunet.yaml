@@ -1,16 +1,16 @@
 # =============================================================================
-# Per-Anatomy DynUNet Inference Job
+# Stage-2 Per-Anatomy DynUNet Full 5-Fold Ensemble Inference Job
 #
-# Routes each patient to its anatomy-specific checkpoint.
-# Missing per-anatomy checkpoints fall back to the multi-anatomy fold0 model.
+# Loads all 5 fold checkpoints per anatomy and mean-ensembles predictions.
+# Falls back to Stage-1 multi-anatomy ensemble for any missing anatomy.
 #
 #   kubectl apply -f nautilius/jobs/infer-per-anatomy-dynunet.yaml
-#   kubectl logs -f job/synthrad2025-infer-per-anatomy
+#   kubectl logs -f job/synthrad2025-infer-stage2-ensemble
 # =============================================================================
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: synthrad2025-infer-per-anatomy
+  name: synthrad2025-infer-stage2-ensemble
 spec:
   backoffLimit: 0
   ttlSecondsAfterFinished: 86400
@@ -28,6 +28,7 @@ spec:
                 - k8s-chase-ci-10.calit2.optiputer.net
                 - k8s-haosu-02.sdsc.optiputer.net
                 - k8s-haosu-03.sdsc.optiputer.net
+                - nautilus-it-gpu03.fullerton.edu
               - key: nvidia.com/gpu.compute.major
                 operator: Gt
                 values:
@@ -38,21 +39,37 @@ spec:
           imagePullPolicy: Always
           command: ["python", "inference/predict_per_anatomy_dynunet.py"]
           args:
-            # Per-anatomy checkpoints (comment out any not yet trained)
-            - "--ckpt_HN"
+            # Stage-2 per-anatomy 5-fold ensemble checkpoints
+            - "--ckpts_HN"
             - "/pvc/checkpoints/dynunet_HN/fold0_best.pth"
-            - "--ckpt_TH"
+            - "/pvc/checkpoints/dynunet_HN/fold1_best.pth"
+            - "/pvc/checkpoints/dynunet_HN/fold2_best.pth"
+            - "/pvc/checkpoints/dynunet_HN/fold3_best.pth"
+            - "/pvc/checkpoints/dynunet_HN/fold4_best.pth"
+            - "--ckpts_TH"
             - "/pvc/checkpoints/dynunet_TH/fold0_best.pth"
-            - "--ckpt_AB"
+            - "/pvc/checkpoints/dynunet_TH/fold1_best.pth"
+            - "/pvc/checkpoints/dynunet_TH/fold2_best.pth"
+            - "/pvc/checkpoints/dynunet_TH/fold3_best.pth"
+            - "/pvc/checkpoints/dynunet_TH/fold4_best.pth"
+            - "--ckpts_AB"
             - "/pvc/checkpoints/dynunet_AB/fold0_best.pth"
-            # Fallback used for any anatomy without a per-anatomy checkpoint:
+            - "/pvc/checkpoints/dynunet_AB/fold1_best.pth"
+            - "/pvc/checkpoints/dynunet_AB/fold2_best.pth"
+            - "/pvc/checkpoints/dynunet_AB/fold3_best.pth"
+            - "/pvc/checkpoints/dynunet_AB/fold4_best.pth"
+            # Stage-1 multi-anatomy fallback (used if any per-anatomy ckpt is missing)
             - "--fallback"
             - "/pvc/checkpoints/dynunet/fold0_best.pth"
+            - "/pvc/checkpoints/dynunet/fold1_best.pth"
+            - "/pvc/checkpoints/dynunet/fold2_best.pth"
+            - "/pvc/checkpoints/dynunet/fold3_best.pth"
+            - "/pvc/checkpoints/dynunet/fold4_best.pth"
             - "--input_dirs"
             - "/pvc/data/synthRAD2025_Task1_Val_Input/Task1"
             - "/pvc/data/synthRAD2025_Task1_Val_Input_D/Task1"
             - "--output_dir"
-            - "/pvc/submissions/dynunet_per_anatomy"
+            - "/pvc/submissions/dynunet_stage2_ensemble"
 
           env:
             - name: PYTORCH_CUDA_ALLOC_CONF
@@ -60,12 +77,12 @@ spec:
 
           resources:
             requests:
-              memory: "28Gi"
+              memory: "20Gi"
               cpu: "4"
               nvidia.com/gpu: "1"
             limits:
-              memory: "36Gi"
-              cpu: "6"
+              memory: "24Gi"
+              cpu: "4"
               nvidia.com/gpu: "1"
 
           volumeMounts:
