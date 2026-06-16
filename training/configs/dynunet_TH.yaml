@@ -30,8 +30,8 @@ data:
   samples_per_volume:  8
 
   augment: true
-  num_workers: 8
-  pin_memory: true
+  num_workers: 4
+  pin_memory: false
 
 # ── Model ───────────────────────────────────────────────────
 model:
@@ -81,7 +81,7 @@ scheduler:
 # ── Sliding window inference ─────────────────────────────────
 inference:
   roi_size:      [64, 128, 128]
-  sw_batch_size: 4
+  sw_batch_size: 2
   overlap:       0.75
   mode:          "gaussian"
 

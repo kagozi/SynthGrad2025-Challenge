@@ -29,7 +29,8 @@ fi
 for ANAT in "${ANATOMIES[@]}"; do
   for FOLD in "${FOLDS[@]}"; do
 
-    JOB_NAME="synthrad2025-dynunet-${ANAT}-fold${FOLD}"
+    ANAT_LOWER=$(echo "${ANAT}" | tr '[:upper:]' '[:lower:]')
+    JOB_NAME="synthrad2025-dynunet-${ANAT_LOWER}-fold${FOLD}"
 
     YAML=$(cat <<EOF
 apiVersion: batch/v1
@@ -53,6 +54,7 @@ spec:
                 - k8s-chase-ci-10.calit2.optiputer.net
                 - k8s-haosu-02.sdsc.optiputer.net
                 - k8s-haosu-03.sdsc.optiputer.net
+                - nautilus-it-gpu03.fullerton.edu
               - key: nvidia.com/gpu.compute.major
                 operator: Gt
                 values:
@@ -81,12 +83,12 @@ spec:
               value: "expandable_segments:True"
           resources:
             requests:
-              memory: "28Gi"
+              memory: "20Gi"
               cpu: "4"
               nvidia.com/gpu: "1"
             limits:
-              memory: "36Gi"
-              cpu: "6"
+              memory: "24Gi"
+              cpu: "4"
               nvidia.com/gpu: "1"
           volumeMounts:
             - name: synthrad2025-vol
