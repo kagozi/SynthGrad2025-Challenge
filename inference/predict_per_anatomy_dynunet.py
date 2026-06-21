@@ -62,7 +62,7 @@ def load_model(checkpoint_path: str, device: torch.device) -> tuple:
         n_anatomy        = mc["n_anatomy"],
         use_anatomy      = mc["use_anatomy"],
         film_hidden      = mc["film_hidden"],
-        deep_supervision = False,
+        deep_supervision = mc.get("deep_supervision", True),
         res_block        = mc["res_block"],
         filters          = mc.get("filters"),
         dropout          = 0.0,
