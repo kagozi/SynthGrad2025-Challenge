@@ -101,12 +101,16 @@ def predict_case_single(model, mr_norm: np.ndarray, anatomy: str,
 def predict_case_ensemble(models: list, mr_norm: np.ndarray, anatomy: str,
                           device: torch.device, roi_size, sw_batch_size: int,
                           overlap: float, mode: str) -> np.ndarray:
-    """Mean-ensemble over all folds for one case."""
-    preds = [
-        predict_case_single(m, mr_norm, anatomy, device,
-                            roi_size, sw_batch_size, overlap, mode)
-        for m in models
-    ]
+    """Mean-ensemble over all folds + left-right TTA for one case."""
+    mr_lr = np.flip(mr_norm, axis=2).copy()
+    preds = []
+    for mr_in, flip_back in ((mr_norm, False), (mr_lr, True)):
+        for m in models:
+            p = predict_case_single(m, mr_in, anatomy, device,
+                                    roi_size, sw_batch_size, overlap, mode)
+            if flip_back:
+                p = np.flip(p, axis=2).copy()
+            preds.append(p)
     return np.mean(preds, axis=0)
 
 
@@ -196,6 +200,10 @@ def main(args):
                 roi_size, sw_batch_size, overlap, mode,
             )
             pred_hu = np.clip(denormalise_ct(pred_norm), -1024, 3000)
+            mask_path = path / "mask.mha"
+            if mask_path.exists():
+                mask = load_mha(mask_path).astype(bool)
+                pred_hu[~mask] = -1024.0
 
             out_path = output_dir / f"sct_{case_id}.mha"
             save_mha(pred_hu, path / "mr.mha", out_path)

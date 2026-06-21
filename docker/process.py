@@ -208,10 +208,14 @@ class SynthradAlgorithm(BaseSynthradAlgorithm):
     def predict(self, input_dict: Dict[str, sitk.Image]) -> sitk.Image:
         assert list(input_dict.keys()) == ["image", "mask", "region"]
 
-        mr_sitk = input_dict["image"]
-        region  = input_dict["region"]
-        anatomy = self._detect_anatomy(region)
+        mr_sitk   = input_dict["image"]
+        mask_sitk = input_dict["mask"]
+        region    = input_dict["region"]
+        anatomy   = self._detect_anatomy(region)
         print(f"[predict] anatomy={anatomy}")
+
+        # Body mask — used to suppress background after inference
+        mask_np = sitk.GetArrayFromImage(mask_sitk).astype(bool)
 
         # Normalise MR — per-case z-score (matches training, handles 0.35T–3T variation)
         mr_np = sitk.GetArrayFromImage(mr_sitk).astype(np.float32)
@@ -220,20 +224,27 @@ class SynthradAlgorithm(BaseSynthradAlgorithm):
         anat_idx = torch.tensor([ANATOMY_TO_IDX[anatomy]], dtype=torch.long,
                                 device=self.device)
 
-        # Run anatomy-specific model(s) and average (ensemble within anatomy)
+        # Run anatomy-specific model(s) with left-right TTA.
+        # For each model: infer on original + LR-flipped MR, flip prediction back,
+        # then average all 2×N results.  LR is axis=2 (W) in (D,H,W) layout.
+        mr_lr = np.flip(mr_np, axis=2).copy()
         preds = []
-        for model, mtype in zip(self.anatomy_models[anatomy], self.anatomy_types[anatomy]):
-            if mtype == "2d":
-                p = self._infer_2d(model, mr_np, anat_idx)
-            else:
-                p = self._infer_3d(model, mr_np, anat_idx)
-            preds.append(p)
+        for mr_in, flip_back in ((mr_np, False), (mr_lr, True)):
+            for model, mtype in zip(self.anatomy_models[anatomy], self.anatomy_types[anatomy]):
+                if mtype == "2d":
+                    p = self._infer_2d(model, mr_in, anat_idx)
+                else:
+                    p = self._infer_3d(model, mr_in, anat_idx)
+                if flip_back:
+                    p = np.flip(p, axis=2).copy()
+                preds.append(p)
 
         pred_norm = np.mean(preds, axis=0)   # (D, H, W)
 
-        # Denormalise to HU
+        # Denormalise to HU and suppress background (every top team does this)
         pred_hu = denormalise_ct(pred_norm)
         pred_hu = np.clip(pred_hu, -1024, 3000).astype(np.float32)
+        pred_hu[~mask_np] = -1024.0
 
         out_sitk = sitk.GetImageFromArray(pred_hu)
         out_sitk.CopyInformation(mr_sitk)
