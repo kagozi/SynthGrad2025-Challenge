@@ -46,7 +46,7 @@ def load_mha_with_meta(path: Path):
 
 # ── Normalisation ───────────────────────────────────────────────────────────────
 
-CT_CLIP = (-1000, 3000)   # HU range to clip before normalising
+CT_CLIP = (-1024, 1500)   # HU range to clip before normalising
 
 
 def normalise_mr(arr: np.ndarray, anatomy: str = None) -> np.ndarray:

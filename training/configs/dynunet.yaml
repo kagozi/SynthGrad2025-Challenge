@@ -1,15 +1,16 @@
 # ============================================================
 # SynthRAD2025 Task 1 — DynUNet Stage 1: Multi-Anatomy Base
 #
-# KoalAI two-stage approach:
-#   Stage 1 (this config): 1500 epochs on ALL anatomies.
-#                          Loss: MAE + GDL only (no AFP).
+# Two-stage workflow:
+#   Stage 1 (this config): 400 epochs on ALL anatomies.
+#                          Loss: MAE + MS-SSIM (no AFP).
 #                          Produces fold0_best.pth … fold4_best.pth.
-#   Stage 2 (dynunet_HN/TH/AB.yaml): 500 epochs per-anatomy fine-tune
-#                          with TotalSegmentator AFP loss.
+#   Stage 2 (dynunet_HN/TH/AB.yaml): 800 epochs per-anatomy fine-tune
+#                          with TotalSegmentator AFP loss added.
 #
 # Optimiser: SGD + polynomial LR decay (nnU-Net defaults).
 # Architecture: DynUNETR3D with residual blocks + FiLM anatomy conditioning.
+# CT clip: [-1024, 1500] HU (narrowed from [-1000, 3000]).
 # ============================================================
 
 experiment:
@@ -25,7 +26,7 @@ data:
 
   folds_csv: "/pvc/data/splits/folds.csv"
 
-  patch_size:          [64, 128, 128]
+  patch_size:          [64, 160, 160]
   samples_per_volume:  8
 
   augment: true
@@ -48,19 +49,20 @@ model:
 # ── Loss ────────────────────────────────────────────────────
 loss:
   w_mae:          1.0
-  w_gdl:          0.5
-  w_perc:         0.0            # no AFP in stage 1 — added in per-anatomy fine-tune
+  w_ssim:         0.5            # MS-SSIM is an evaluation metric — train toward it
+  w_gdl:          0.0            # removed — top teams don't use it
+  w_perc:         0.0            # AFP added in Stage 2 per-anatomy fine-tune
   bone_weight:    2.5
-  bone_threshold: -0.4
+  bone_threshold: 0.0            # HU≈200 in [-1024,1500] space ≈ 0.0 normalised
   perc_max_slices: 16
   aux_weights:    [0.5, 0.25]
 
 # ── Training ────────────────────────────────────────────────
 training:
-  epochs:               1500
+  epochs:               400
   batch_size:           2
-  val_every_n_epochs:   25
-  save_every_n_epochs:  100
+  val_every_n_epochs:   20
+  save_every_n_epochs:  50
 
 # ── Optimiser (nnU-Net defaults) ────────────────────────────
 optimizer:
@@ -73,13 +75,13 @@ optimizer:
 # ── Scheduler ───────────────────────────────────────────────
 scheduler:
   name:  "poly"
-  T_max: 1500         # must match training.epochs
+  T_max: 400         # must match training.epochs
 
 # ── Sliding window inference ─────────────────────────────────
 inference:
-  roi_size:      [64, 128, 128]
+  roi_size:      [64, 160, 160]
   sw_batch_size: 4
-  overlap:       0.75
+  overlap:       0.5
   mode:          "gaussian"
 
 # ── Output ──────────────────────────────────────────────────

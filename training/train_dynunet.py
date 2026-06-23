@@ -46,7 +46,7 @@ from src.dataset import (
     normalise_mr,
     ANATOMY_TO_IDX,
 )
-from src.losses import MAELoss, GradientDifferenceLoss, PerceptualLoss, TotalSegmentatorAFP
+from src.losses import MAELoss, MSSSIMLoss, GradientDifferenceLoss, PerceptualLoss, TotalSegmentatorAFP
 from src.metrics import compute_mae, compute_psnr, compute_ms_ssim
 from src.models.dynunet import DynUNETR3D
 
@@ -87,7 +87,7 @@ class DynLoss(torch.nn.Module):
     """
     3D training loss with deep supervision support.
 
-    Main output: bone-weighted MAE + GDL + AFP perceptual (full resolution).
+    Main output: bone-weighted MAE + MS-SSIM + AFP perceptual (full resolution).
     Auxiliary outputs: bone-weighted MAE only (lower resolution).
 
     w_perc > 0 enables AFP perceptual loss.
@@ -97,8 +97,8 @@ class DynLoss(torch.nn.Module):
 
     def __init__(
         self,
-        w_mae=1.0, w_gdl=0.5, w_perc=0.0,
-        bone_weight=2.5, bone_threshold=-0.4,
+        w_mae=1.0, w_ssim=0.0, w_gdl=0.0, w_perc=0.0,
+        bone_weight=2.5, bone_threshold=0.0,
         aux_weights=None,
         perc_max_slices=16,
         afp_type="vgg",
@@ -106,11 +106,13 @@ class DynLoss(torch.nn.Module):
     ):
         super().__init__()
         self.w_mae       = w_mae
+        self.w_ssim      = w_ssim
         self.w_gdl       = w_gdl
         self.w_perc      = w_perc
         self.aux_weights = aux_weights or [0.5, 0.25]
         self.mae         = MAELoss(bone_weight=bone_weight, bone_threshold=bone_threshold)
-        self.gdl         = GradientDifferenceLoss()
+        self.ssim        = MSSSIMLoss() if w_ssim > 0 else None
+        self.gdl         = GradientDifferenceLoss() if w_gdl > 0 else None
         if w_perc > 0:
             if afp_type == "totalseg":
                 self.perc = TotalSegmentatorAFP(
@@ -126,7 +128,9 @@ class DynLoss(torch.nn.Module):
         losses = {}
         if self.w_mae > 0:
             losses["mae"]  = self.w_mae  * self.mae(pred, target, mask)
-        if self.w_gdl > 0:
+        if self.w_ssim > 0 and self.ssim is not None:
+            losses["ssim"] = self.w_ssim * self.ssim(pred, target, mask)
+        if self.w_gdl > 0 and self.gdl is not None:
             losses["gdl"]  = self.w_gdl  * self.gdl(pred, target, mask)
         if self.w_perc > 0 and self.perc is not None:
             losses["perc"] = self.w_perc * self.perc(pred, target, mask)
@@ -437,7 +441,8 @@ def train(cfg: dict, fold: int, resume: str = None, finetune_from: str = None):
     lc = cfg["loss"]
     criterion = DynLoss(
         w_mae           = lc["w_mae"],
-        w_gdl           = lc["w_gdl"],
+        w_ssim          = lc.get("w_ssim",          0.0),
+        w_gdl           = lc.get("w_gdl",           0.0),
         w_perc          = lc.get("w_perc",          0.0),
         bone_weight     = lc["bone_weight"],
         bone_threshold  = lc["bone_threshold"],
@@ -474,7 +479,7 @@ def train(cfg: dict, fold: int, resume: str = None, finetune_from: str = None):
     # ── Main loop ──────────────────────────────────────────────────────────────
     for epoch in range(start_epoch, tc["epochs"]):
         model.train()
-        epoch_losses: dict[str, list] = {"total": [], "mae": [], "gdl": [], "perc": [], "aux": []}
+        epoch_losses: dict[str, list] = {"total": [], "mae": [], "ssim": [], "gdl": [], "perc": [], "aux": []}
 
         pbar = tqdm(train_loader, desc=f"Epoch {epoch+1:03d}/{tc['epochs']}", leave=True)
         for batch in pbar:
@@ -500,7 +505,7 @@ def train(cfg: dict, fold: int, resume: str = None, finetune_from: str = None):
             scaler.step(optimizer)
             scaler.update()
 
-            for k in ["total", "mae", "gdl", "perc", "aux"]:
+            for k in ["total", "mae", "ssim", "gdl", "perc", "aux"]:
                 if k in losses:
                     epoch_losses[k].append(losses[k].item())
 

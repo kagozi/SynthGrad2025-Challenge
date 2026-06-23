@@ -103,6 +103,14 @@ class MSSSIMLoss(nn.Module):
         target: torch.Tensor,
         mask: torch.Tensor = None,
     ) -> torch.Tensor:
+        # Reshape 3D (B,C,D,H,W) → 2D (B*D,C,H,W) so 2D convolutions apply slice-wise
+        if pred.ndim == 5:
+            B, C, D, H, W = pred.shape
+            pred   = pred.permute(0, 2, 1, 3, 4).reshape(B * D, C, H, W)
+            target = target.permute(0, 2, 1, 3, 4).reshape(B * D, C, H, W)
+            if mask is not None:
+                mask = mask.permute(0, 2, 1, 3, 4).reshape(B * D, 1, H, W)
+
         ms_ssim_val = torch.zeros(1, device=pred.device)
 
         for i in range(self.levels):

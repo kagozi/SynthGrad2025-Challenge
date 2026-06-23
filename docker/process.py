@@ -45,9 +45,9 @@ from base_algorithm import BaseSynthradAlgorithm
 MODEL_DIR = Path("/opt/ml/model")
 
 # Sliding-window inference settings (matched to training configs)
-SW_ROI_SIZE   = (64, 128, 128)   # (D, H, W) patch
+SW_ROI_SIZE   = (64, 160, 160)   # (D, H, W) patch
 SW_BATCH_SIZE = 2
-SW_OVERLAP    = 0.75
+SW_OVERLAP    = 0.5
 
 
 def _build_model(cfg: dict):
