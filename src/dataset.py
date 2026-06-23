@@ -49,18 +49,18 @@ def load_mha_with_meta(path: Path):
 CT_CLIP = (-1024, 1500)   # HU range to clip before normalising
 
 
-def normalise_mr(arr: np.ndarray, anatomy: str = None) -> np.ndarray:
+def normalise_mr(arr: np.ndarray, anatomy: str = None,
+                 mask: np.ndarray = None) -> np.ndarray:
     """
     Per-case z-score normalisation → [0, 1].
 
-    Computes mean/std from foreground voxels (arr > 0), clips extreme values
-    at ±3σ, then maps to [0, 1].  Handles the large intensity variation across
-    SynthRAD2025 field strengths (0.35T–3T, 5 centers) much better than a
-    fixed global clip.
+    Computes mean/std from body-mask voxels when `mask` is provided, otherwise
+    falls back to non-zero voxels as a proxy.  Clips at ±3σ then maps to [0,1].
+    Handles 0.35T–3T variation across SynthRAD2025 centers.
 
     The `anatomy` argument is kept for API compatibility but is no longer used.
     """
-    fg = arr[arr > 0]
+    fg = arr[mask.astype(bool)] if mask is not None else arr[arr > 0]
     if fg.size == 0:
         return np.zeros_like(arr)
     mean = float(fg.mean())
@@ -71,11 +71,13 @@ def normalise_mr(arr: np.ndarray, anatomy: str = None) -> np.ndarray:
     return arr
 
 
-def normalise_ct(arr: np.ndarray) -> np.ndarray:
-    """Clip HU range then scale to [-1, 1]."""
+def normalise_ct(arr: np.ndarray, mask: np.ndarray = None) -> np.ndarray:
+    """Clip HU range, scale to [-1, 1], and zero-out background to -1024 HU."""
     lo, hi = CT_CLIP
     arr    = np.clip(arr, lo, hi)
     arr    = (arr - lo) / (hi - lo) * 2.0 - 1.0   # → [-1, 1]
+    if mask is not None:
+        arr[~mask.astype(bool)] = -1.0   # background → -1024 HU equivalent
     return arr
 
 
@@ -244,10 +246,11 @@ class SynthRAD2DDataset(Dataset):
             ct_raw   = load_mha(path / "ct.mha")
             mask_raw = load_mha(path / "mask.mha") if (path / "mask.mha").exists() \
                        else np.ones_like(mr_raw)
+            mask_bool = (mask_raw > 0)
             _worker_cache[c_idx] = (
-                normalise_mr(mr_raw, anatomy),
-                normalise_ct(ct_raw),
-                (mask_raw > 0).astype(np.float32),
+                normalise_mr(mr_raw, anatomy, mask=mask_bool),
+                normalise_ct(ct_raw, mask=mask_bool),
+                mask_bool.astype(np.float32),
             )
 
         mr_arr, ct_arr, mask_arr = _worker_cache[c_idx]
@@ -389,12 +392,13 @@ class SynthRAD3DDataset(Dataset):
 
         mr_arr   = load_mha(path / "mr.mha")
         ct_arr   = load_mha(path / "ct.mha")
-        mask_arr = load_mha(path / "mask.mha") if (path / "mask.mha").exists() \
+        mask_raw = load_mha(path / "mask.mha") if (path / "mask.mha").exists() \
                    else np.ones_like(mr_arr)
+        mask_bool = (mask_raw > 0)
 
-        mr_arr   = normalise_mr(mr_arr, anatomy)
-        ct_arr   = normalise_ct(ct_arr)
-        mask_arr = (mask_arr > 0).astype(np.float32)
+        mr_arr   = normalise_mr(mr_arr, anatomy, mask=mask_bool)
+        ct_arr   = normalise_ct(ct_arr, mask=mask_bool)
+        mask_arr = mask_bool.astype(np.float32)
 
         D, H, W = mr_arr.shape
         pd_, ph, pw = self.patch_size
@@ -440,12 +444,12 @@ class SynthRADInferenceDataset(Dataset):
         self.anatomy   = anatomy
         self.n_context = n_context
 
-        mr_arr      = load_mha(case_path / "mr.mha")
-        self.mr_arr = normalise_mr(mr_arr, anatomy)
-
-        mask_path   = case_path / "mask.mha"
-        self.mask   = load_mha(mask_path) if mask_path.exists() \
-                      else np.ones_like(self.mr_arr)
+        mr_arr    = load_mha(case_path / "mr.mha")
+        mask_path = case_path / "mask.mha"
+        mask_raw  = load_mha(mask_path) if mask_path.exists() else None
+        self.mr_arr = normalise_mr(mr_arr, anatomy,
+                                   mask=(mask_raw > 0) if mask_raw is not None else None)
+        self.mask = mask_raw if mask_raw is not None else np.ones_like(mr_arr)
 
         self.n_slices = self.mr_arr.shape[0]
         self.shape    = self.mr_arr.shape   # (D, H, W)

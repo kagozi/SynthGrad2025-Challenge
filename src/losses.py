@@ -532,8 +532,9 @@ class TotalSegmentatorAFP(nn.Module):
 
     @staticmethod
     def _to_nnunet(x: torch.Tensor) -> torch.Tensor:
-        """[-1, 1] → approximate nnU-Net z-score (CT mean ≈ 100 HU, std ≈ 350 HU)."""
-        hu = (x.clamp(-1.0, 1.0) + 1.0) * 2000.0 - 1000.0   # → HU  (clip -1000…3000)
+        """[-1, 1] normalised CT (clip -1024…1500 HU) → nnU-Net z-score space.
+        Must match CT_CLIP in src/dataset.py."""
+        hu = (x.clamp(-1.0, 1.0) + 1.0) * 1262.0 - 1024.0   # → HU  (clip -1024…1500)
         return (hu - 100.0) / 350.0
 
     # ── forward ─────────────────────────────────────────────────────────────────

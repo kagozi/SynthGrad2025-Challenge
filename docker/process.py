@@ -214,12 +214,12 @@ class SynthradAlgorithm(BaseSynthradAlgorithm):
         anatomy   = self._detect_anatomy(region)
         print(f"[predict] anatomy={anatomy}")
 
-        # Body mask — used to suppress background after inference
+        # Body mask — used to condition MR normalisation (matches training)
         mask_np = sitk.GetArrayFromImage(mask_sitk).astype(bool)
 
-        # Normalise MR — per-case z-score (matches training, handles 0.35T–3T variation)
+        # Normalise MR using body mask for accurate z-score statistics
         mr_np = sitk.GetArrayFromImage(mr_sitk).astype(np.float32)
-        mr_np = normalise_mr(mr_np, anatomy)
+        mr_np = normalise_mr(mr_np, anatomy, mask=mask_np)
 
         anat_idx = torch.tensor([ANATOMY_TO_IDX[anatomy]], dtype=torch.long,
                                 device=self.device)

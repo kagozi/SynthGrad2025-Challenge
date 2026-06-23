@@ -194,16 +194,14 @@ def main(args):
         path    = Path(case["path"])
 
         try:
-            mr_norm   = normalise_mr(load_mha(path / "mr.mha"), anatomy)
+            mask_path = path / "mask.mha"
+            mask      = load_mha(mask_path).astype(bool) if mask_path.exists() else None
+            mr_norm   = normalise_mr(load_mha(path / "mr.mha"), anatomy, mask=mask)
             pred_norm = predict_case_ensemble(
                 anatomy_models[anatomy], mr_norm, anatomy, device,
                 roi_size, sw_batch_size, overlap, mode,
             )
             pred_hu = np.clip(denormalise_ct(pred_norm), -1024, 3000)
-            mask_path = path / "mask.mha"
-            if mask_path.exists():
-                mask = load_mha(mask_path).astype(bool)
-                pred_hu[~mask] = -1024.0
 
             out_path = output_dir / f"sct_{case_id}.mha"
             save_mha(pred_hu, path / "mr.mha", out_path)
