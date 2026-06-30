@@ -2,12 +2,12 @@
 # DynUNet Per-Anatomy Training — Abdomen, Fold 3
 #
 #   kubectl apply -f nautilius/jobs/train-dynunet-AB-fold3.yaml
-#   kubectl logs -f job/synthrad2025-dynunet-AB-fold3
+#   kubectl logs -f job/synthrad2025-dynunet-ab-fold3
 # =============================================================================
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: synthrad2025-dynunet-AB-fold3
+  name: synthrad2025-dynunet-ab-fold3
 spec:
   backoffLimit: 0
   ttlSecondsAfterFinished: 86400

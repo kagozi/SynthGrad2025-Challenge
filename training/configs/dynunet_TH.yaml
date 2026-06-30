@@ -27,8 +27,8 @@ data:
   samples_per_volume:  8
 
   augment: true
-  num_workers: 8
-  pin_memory: true
+  num_workers: 4
+  pin_memory: false
 
 # ── Model ───────────────────────────────────────────────────
 model:

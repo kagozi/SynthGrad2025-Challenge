@@ -2,12 +2,12 @@
 # DynUNet Per-Anatomy Training — Thorax, Fold 1
 #
 #   kubectl apply -f nautilius/jobs/train-dynunet-TH-fold1.yaml
-#   kubectl logs -f job/synthrad2025-dynunet-TH-fold1
+#   kubectl logs -f job/synthrad2025-dynunet-th-fold1
 # =============================================================================
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: synthrad2025-dynunet-TH-fold1
+  name: synthrad2025-dynunet-th-fold1
 spec:
   backoffLimit: 0
   ttlSecondsAfterFinished: 86400

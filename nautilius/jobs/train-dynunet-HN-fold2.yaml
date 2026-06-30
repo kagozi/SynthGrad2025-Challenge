@@ -2,12 +2,12 @@
 # DynUNet Per-Anatomy Training — Head & Neck, Fold 2
 #
 #   kubectl apply -f nautilius/jobs/train-dynunet-HN-fold2.yaml
-#   kubectl logs -f job/synthrad2025-dynunet-HN-fold2
+#   kubectl logs -f job/synthrad2025-dynunet-hn-fold2
 # =============================================================================
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: synthrad2025-dynunet-HN-fold2
+  name: synthrad2025-dynunet-hn-fold2
 spec:
   backoffLimit: 0
   ttlSecondsAfterFinished: 86400

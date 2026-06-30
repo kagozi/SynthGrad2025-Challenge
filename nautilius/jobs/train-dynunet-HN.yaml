@@ -5,12 +5,12 @@
 # Fine-tune from the fold0 multi-anatomy checkpoint (stage 2).
 #
 #   kubectl apply -f nautilius/jobs/train-dynunet-HN.yaml
-#   kubectl logs -f job/synthrad2025-dynunet-HN
+#   kubectl logs -f job/synthrad2025-dynunet-hn
 # =============================================================================
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: synthrad2025-dynunet-HN
+  name: synthrad2025-dynunet-hn
 spec:
   backoffLimit: 0
   ttlSecondsAfterFinished: 86400
