@@ -58,11 +58,14 @@ loss:
   aux_weights:    [0.5, 0.25]
 
 # ── Training ────────────────────────────────────────────────
+# nnU-Net-style iteration-based schedule: 1000 epochs × 250 steps = 250K gradient
+# updates total (vs 739K with full-epoch 400ep — 3× fewer steps, ~24h on one GPU).
 training:
-  epochs:               400
+  epochs:               1000
+  steps_per_epoch:      250
   batch_size:           2
-  val_every_n_epochs:   20
-  save_every_n_epochs:  50
+  val_every_n_epochs:   50
+  save_every_n_epochs:  100
 
 # ── Optimiser (nnU-Net defaults) ────────────────────────────
 optimizer:
@@ -75,12 +78,12 @@ optimizer:
 # ── Scheduler ───────────────────────────────────────────────
 scheduler:
   name:  "poly"
-  T_max: 400         # must match training.epochs
+  T_max: 1000        # must match training.epochs
 
 # ── Sliding window inference ─────────────────────────────────
 inference:
   roi_size:      [64, 160, 160]
-  sw_batch_size: 4
+  sw_batch_size: 8
   overlap:       0.5
   mode:          "gaussian"
 

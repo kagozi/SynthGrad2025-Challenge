@@ -21,6 +21,7 @@ import os
 import random
 import sys
 from functools import partial
+from itertools import cycle, islice
 from pathlib import Path
 
 import matplotlib
@@ -399,8 +400,14 @@ def train(cfg: dict, fold: int, resume: str = None, finetune_from: str = None):
         persistent_workers = (dc["num_workers"] > 0),
     )
 
-    print(f"[Train] Train patches/epoch: {len(train_ds)}  |  Val cases: {len(val_cases)}")
-    wandb.config.update({"train_patches": len(train_ds), "val_cases": len(val_cases)})
+    steps_per_epoch = tc.get("steps_per_epoch", None)
+    total_steps_per_epoch = steps_per_epoch or len(train_loader)
+    print(
+        f"[Train] Train patches/epoch: {len(train_ds)}  |  Val cases: {len(val_cases)}"
+        + (f"  |  steps_per_epoch: {steps_per_epoch} (nnU-Net style)" if steps_per_epoch else "")
+    )
+    wandb.config.update({"train_patches": len(train_ds), "val_cases": len(val_cases),
+                         "steps_per_epoch": total_steps_per_epoch})
 
     # ── Model ──────────────────────────────────────────────────────────────────
     model    = build_model(cfg).to(device)
@@ -476,12 +483,19 @@ def train(cfg: dict, fold: int, resume: str = None, finetune_from: str = None):
     overlap       = ic["overlap"]
     sw_mode       = ic["mode"]
 
+    # Infinite iterator for iteration-based training (nnU-Net style).
+    # When steps_per_epoch is set, each "epoch" draws exactly that many batches
+    # regardless of dataset size, matching nnU-Net's 250 steps × 1000 epochs scheme.
+    _infinite_loader = cycle(train_loader) if steps_per_epoch else None
+
     # ── Main loop ──────────────────────────────────────────────────────────────
     for epoch in range(start_epoch, tc["epochs"]):
         model.train()
         epoch_losses: dict[str, list] = {"total": [], "mae": [], "ssim": [], "gdl": [], "perc": [], "aux": []}
 
-        pbar = tqdm(train_loader, desc=f"Epoch {epoch+1:03d}/{tc['epochs']}", leave=True)
+        batch_src = islice(_infinite_loader, steps_per_epoch) if steps_per_epoch else train_loader
+        pbar = tqdm(batch_src, desc=f"Epoch {epoch+1:03d}/{tc['epochs']}",
+                    total=total_steps_per_epoch, leave=True)
         for batch in pbar:
             mr   = batch["mr"].to(device, non_blocking=True)
             ct   = batch["ct"].to(device, non_blocking=True)
