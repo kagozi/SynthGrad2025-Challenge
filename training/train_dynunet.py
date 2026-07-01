@@ -21,7 +21,7 @@ import os
 import random
 import sys
 from functools import partial
-from itertools import cycle, islice
+from itertools import islice
 from pathlib import Path
 
 import matplotlib
@@ -484,16 +484,21 @@ def train(cfg: dict, fold: int, resume: str = None, finetune_from: str = None):
     sw_mode       = ic["mode"]
 
     # Infinite iterator for iteration-based training (nnU-Net style).
-    # When steps_per_epoch is set, each "epoch" draws exactly that many batches
-    # regardless of dataset size, matching nnU-Net's 250 steps × 1000 epochs scheme.
-    _infinite_loader = cycle(train_loader) if steps_per_epoch else None
+    # Uses a generator (yield from) instead of itertools.cycle — cycle caches
+    # every batch and holds their shared-memory FDs open, exhausting the Linux
+    # FD limit (~1024) after one full pass through the dataset.
+    def _make_infinite(loader):
+        while True:
+            yield from loader
+
+    _inf_gen = _make_infinite(train_loader) if steps_per_epoch else None
 
     # ── Main loop ──────────────────────────────────────────────────────────────
     for epoch in range(start_epoch, tc["epochs"]):
         model.train()
         epoch_losses: dict[str, list] = {"total": [], "mae": [], "ssim": [], "gdl": [], "perc": [], "aux": []}
 
-        batch_src = islice(_infinite_loader, steps_per_epoch) if steps_per_epoch else train_loader
+        batch_src = islice(_inf_gen, steps_per_epoch) if steps_per_epoch else train_loader
         pbar = tqdm(batch_src, desc=f"Epoch {epoch+1:03d}/{tc['epochs']}",
                     total=total_steps_per_epoch, leave=True)
         for batch in pbar:
