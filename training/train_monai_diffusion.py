@@ -220,9 +220,7 @@ def validate(diffusion, ema, loader, device, ddim_steps: int, use_amp: bool):
                 continue
             all_mae.append(compute_mae(pred_hu, ct_hu, m))
             all_psnr.append(compute_psnr(pred_hu, ct_hu, m))
-            all_ssim.append(compute_ms_ssim(
-                pred[i:i+1].cpu(), ct[i:i+1].cpu(),
-            ).item())
+            all_ssim.append(compute_ms_ssim(pred_hu, ct_hu))
 
     diffusion.train()
     return (
