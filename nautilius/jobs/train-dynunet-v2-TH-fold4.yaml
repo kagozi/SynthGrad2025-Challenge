@@ -1,0 +1,84 @@
+# =============================================================================
+# DynUNet v2 Stage 2 — Head & Neck, Fold 0
+#
+# Fine-tunes from dynunet_v2 Stage 1 checkpoint (CT clip fixed to [-1024,3000]).
+#
+#   kubectl apply -f nautilius/jobs/train-dynunet-v2-TH-fold4.yaml
+#   kubectl logs -f job/synthrad2025-dynunet-v2-th-fold4
+# =============================================================================
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: synthrad2025-dynunet-v2-th-fold4
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 86400
+  template:
+    spec:
+      restartPolicy: Never
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: NotIn
+                values:
+                - k8s-chase-ci-10.calit2.optiputer.net
+                - k8s-haosu-02.sdsc.optiputer.net
+                - k8s-haosu-03.sdsc.optiputer.net
+              - key: nvidia.com/gpu.compute.major
+                operator: Gt
+                values:
+                - "7"
+      containers:
+        - name: trainer
+          image: ghcr.io/kagozi/synthrad2025-train:latest
+          imagePullPolicy: Always
+          command: ["python", "training/train_dynunet.py"]
+          args:
+            - "--config"
+            - "training/configs/dynunet_v2_TH.yaml"
+            - "--fold"
+            - "4"
+            - "--finetune_from"
+            - "/pvc/checkpoints/dynunet_v2/fold4_best.pth"
+            # Uncomment to resume an interrupted fine-tune run:
+            # - "--resume"
+            # - "/pvc/checkpoints/dynunet_v2_TH/fold4_last.pth"
+          env:
+            - name: WANDB_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: wandb-secret
+                  key: api-key
+            - name: WANDB_PROJECT
+              value: "synthrad2025-task1"
+            - name: PYTORCH_CUDA_ALLOC_CONF
+              value: "expandable_segments:True"
+          resources:
+            requests:
+              memory: "28Gi"
+              cpu: "4"
+              nvidia.com/gpu: "1"
+            limits:
+              memory: "36Gi"
+              cpu: "6"
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: synthrad2025-vol
+              mountPath: /pvc
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: synthrad2025-vol
+          persistentVolumeClaim:
+            claimName: synthrad2025-pvc
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"

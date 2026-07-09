@@ -1,0 +1,94 @@
+# ============================================================
+# SynthRAD2025 Task 1 — MONAI 3D Diffusion v2
+#
+# Closest match to Faking_it (rank 7, best diffusion in challenge):
+#   - VS-DDPM: variable step buckets [50,100,250,500,1000] per batch
+#   - VLB: backbone predicts noise + log-variance (out_channels=2)
+#   - Larger backbone: [64,128,256,512], attention at 3 levels, 3 res blocks
+#   - Cosine LR with warmup
+#
+# Memory: ~200M params. Use batch_size=1 + grad_accum=4 (effective=4).
+# Runs in parallel with dynunet_v2 CNN track.
+# ============================================================
+
+experiment:
+  name: "monai_diffusion_3d_v2"
+  fold: 0
+  seed: 42
+
+# ── Data ────────────────────────────────────────────────────
+data:
+  data_dirs:
+    - "/pvc/data/synthRAD2025_Task1_Train/Task1"
+    - "/pvc/data/synthRAD2025_Task1_Train_D/Task1"
+
+  folds_csv: "/pvc/data/splits/folds.csv"
+
+  patch_size:          [32, 128, 128]
+  samples_per_volume:  8
+
+  num_workers: 4
+  pin_memory:  false
+
+  # VS-DDPM: model trains across all step budgets simultaneously
+  vs_step_buckets: [50, 100, 250, 500, 1000]
+
+# ── Model ───────────────────────────────────────────────────
+model:
+  in_channels:        2       # MR + noisy CT (channel concat)
+  out_channels:       2       # noise ε + log-variance v (for VLB)
+  channels:           [64, 128, 256, 512]
+  attention_levels:   [false, true, true, true]
+  num_res_blocks:     3
+  num_head_channels:  64
+  norm_num_groups:    32
+  norm_eps:           1.0e-6
+  n_anatomy:          3
+  dropout_cattn:      0.1
+  use_flash_attention: true
+
+# ── Diffusion schedule ───────────────────────────────────────
+diffusion:
+  T:         1000
+  cosine_s:  0.008
+
+# ── Loss ────────────────────────────────────────────────────
+loss:
+  noise_mse_weight: 1.0
+  mae_weight:       0.25
+  ssim_weight:      0.25
+  snr_gamma:        5.0
+  vlb_weight:       0.001     # Improved DDPM VLB term
+
+# ── Training ────────────────────────────────────────────────
+training:
+  max_steps:             100000
+  batch_size:            1
+  gradient_accumulation: 4     # effective batch = 4
+  use_amp:               true
+  steps_per_log:         100
+  steps_per_val:         2500
+  steps_per_save:        5000
+  val_ddim_steps:        10
+
+# ── Optimiser ───────────────────────────────────────────────
+optimizer:
+  lr:           1.0e-4
+  weight_decay: 1.0e-4
+  betas:        [0.9, 0.999]
+
+# ── LR scheduler ────────────────────────────────────────────
+scheduler:
+  name:         "cosine"
+  warmup_steps: 2500
+  eta_min:      1.0e-6
+
+# ── EMA ─────────────────────────────────────────────────────
+ema:
+  enabled: true
+  decay:   0.9999
+
+# ── Output ──────────────────────────────────────────────────
+output:
+  checkpoint_dir: "/pvc/checkpoints/monai_diffusion_3d_v2"
+  save_best:      true

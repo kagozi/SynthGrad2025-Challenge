@@ -1,0 +1,95 @@
+# ============================================================
+# SynthRAD2025 Task 1 — DynUNet v2: AFP from Stage 1
+#
+# Key improvements over dynunet.yaml:
+#   1. CT clip fixed to [-1024, 3000] HU (matches challenge eval)
+#      — was [-1024, 1500], cutting off dense cortical bone
+#   2. TotalSegmentator AFP loss from Stage 1 (w_perc=0.1)
+#      — previously only added in Stage 2 fine-tune
+#   3. bone_threshold corrected to -0.4 (HU≈200 in new [-1024,3000] range)
+#      — was 0.0 (correct only for old [-1024,1500] range)
+#   4. bone_weight raised to 3.0 to compensate for wider HU range
+#
+# Two-stage workflow (same as before):
+#   Stage 1 (this config): 600 epochs, all anatomies.
+#   Stage 2 (dynunet_v2_HN/TH/AB.yaml): 400 epochs per-anatomy, stronger AFP.
+# ============================================================
+
+experiment:
+  name: "dynunet_v2"
+  fold: 0
+  seed: 42
+
+# ── Data ────────────────────────────────────────────────────
+data:
+  data_dirs:
+    - "/pvc/data/synthRAD2025_Task1_Train/Task1"
+    - "/pvc/data/synthRAD2025_Task1_Train_D/Task1"
+
+  folds_csv: "/pvc/data/splits/folds.csv"
+
+  patch_size:          [64, 160, 160]
+  samples_per_volume:  8
+
+  augment:     true
+  num_workers: 8
+  pin_memory:  true
+
+# ── Model ───────────────────────────────────────────────────
+model:
+  name:             "dynunet"
+  in_channels:      1
+  n_anatomy:        3
+  use_anatomy:      true
+  film_hidden:      128
+  deep_supervision: true
+  deep_supr_num:    2
+  res_block:        true
+  filters:          null
+  dropout:          0.0
+
+# ── Loss ────────────────────────────────────────────────────
+loss:
+  w_mae:          1.0
+  w_ssim:         0.5
+  w_gdl:          0.0
+  w_perc:         0.1           # AFP from Stage 1 (KoalAI/ImagePasNet key difference)
+  bone_weight:    3.0           # stronger bone emphasis with wider HU range
+  bone_threshold: -0.4          # HU≈200 in [-1024,3000]: (200+1024)/4024*2-1 ≈ -0.39
+  perc_max_slices: 16
+  afp_type:       "totalseg"    # CT-domain AFP (falls back to VGG16 if unavailable)
+  afp_weights_dir: null
+  aux_weights:    [0.5, 0.25]   # deep supervision auxiliary loss weights
+
+# ── Training ────────────────────────────────────────────────
+training:
+  epochs:              600
+  steps_per_epoch:     250
+  batch_size:          2
+  val_every_n_epochs:  50
+  save_every_n_epochs: 100
+
+# ── Optimiser (nnU-Net defaults) ────────────────────────────
+optimizer:
+  name:         "sgd"
+  lr:           0.01
+  momentum:     0.99
+  nesterov:     true
+  weight_decay: 3.0e-5
+
+# ── Scheduler ───────────────────────────────────────────────
+scheduler:
+  name:  "poly"
+  T_max: 600
+
+# ── Sliding window inference ─────────────────────────────────
+inference:
+  roi_size:      [64, 160, 160]
+  sw_batch_size: 8
+  overlap:       0.5
+  mode:          "gaussian"
+
+# ── Output ──────────────────────────────────────────────────
+output:
+  checkpoint_dir: "/pvc/checkpoints/dynunet_v2"
+  save_best:      true

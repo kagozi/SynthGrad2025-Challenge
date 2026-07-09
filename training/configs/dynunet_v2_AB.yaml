@@ -1,0 +1,91 @@
+# ============================================================
+# SynthRAD2025 Task 1 — DynUNet v2 Stage 2: Abdomen
+#
+# Fine-tune from dynunet_v2 Stage 1 checkpoint.
+# CT clip: [-1024, 3000] HU (corrected from old 1500).
+#
+# Changes vs dynunet_AB.yaml:
+#   - bone_threshold: -0.4  (HU≈200 in [-1024,3000] space)
+#   - bone_weight:     3.0   (wider HU range needs stronger emphasis)
+#   - afp_weights_dir pointed at actual pretrained weights
+# ============================================================
+
+experiment:
+  name: "dynunet_v2_AB"
+  fold: 0
+  seed: 42
+
+# ── Data ────────────────────────────────────────────────────
+data:
+  data_dirs:
+    - "/pvc/data/synthRAD2025_Task1_Train/Task1"
+    - "/pvc/data/synthRAD2025_Task1_Train_D/Task1"
+
+  folds_csv:       "/pvc/data/splits/folds.csv"
+  anatomy_filter:  "AB"
+
+  patch_size:          [64, 160, 160]
+  samples_per_volume:  8
+
+  augment: true
+  num_workers: 4
+  pin_memory: false
+
+# ── Model ───────────────────────────────────────────────────
+model:
+  name:             "dynunet"
+  in_channels:      1
+  n_anatomy:        3
+  use_anatomy:      true
+  film_hidden:      128
+  deep_supervision: true
+  deep_supr_num:    2
+  res_block:        true
+  filters:          null
+  dropout:          0.0
+
+# ── Loss ────────────────────────────────────────────────────
+loss:
+  w_mae:           1.0
+  w_ssim:          0.5
+  w_gdl:           0.0
+  w_perc:          0.3            # stronger AFP for Stage 2
+  afp_type:        "totalseg"
+  afp_weights_dir: "/pvc/pretrained/totalsegmentator/nnunet/results"
+  bone_weight:     3.0
+  bone_threshold:  -0.4           # HU≈200 in [-1024,3000]: (200+1024)/4024*2-1 ≈ -0.39
+  perc_max_slices: 16
+  aux_weights:     [0.5, 0.25]
+
+# ── Training ────────────────────────────────────────────────
+training:
+  epochs:               400
+  steps_per_epoch:      250
+  batch_size:           2
+  val_every_n_epochs:   50
+  save_every_n_epochs:  100
+
+# ── Optimiser (nnU-Net defaults) ────────────────────────────
+optimizer:
+  name:         "sgd"
+  lr:           0.005             # lower LR for fine-tuning
+  momentum:     0.99
+  nesterov:     true
+  weight_decay: 3.0e-5
+
+# ── Scheduler ───────────────────────────────────────────────
+scheduler:
+  name:  "poly"
+  T_max: 400
+
+# ── Sliding window inference ─────────────────────────────────
+inference:
+  roi_size:      [64, 160, 160]
+  sw_batch_size: 6
+  overlap:       0.5
+  mode:          "gaussian"
+
+# ── Output ──────────────────────────────────────────────────
+output:
+  checkpoint_dir: "/pvc/checkpoints/dynunet_v2_AB"
+  save_best:      true

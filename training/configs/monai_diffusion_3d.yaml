@@ -1,0 +1,102 @@
+# ============================================================
+# SynthRAD2025 Task 1 — 3D MONAI Conditional Diffusion Model
+#
+# Architecture: MONAI DiffusionModelUNet (3D), in_channels=2 (MR+noisy CT)
+# Conditioning: MR slice concatenated channel-wise + anatomy class embedding
+# Noise schedule: cosine (Nichol & Dhariwal 2021), T=1000
+# Parameterisation: epsilon (predict noise)
+# Inference: DDIM deterministic sampler, 50 steps
+# Loss: noise MSE + Min-SNR weighted MAE + SSIM
+# EMA: decay=0.999
+#
+# CT clip: [-1024, 3000] HU (matches challenge eval range — fixed from Stage 1)
+# Patch size: [32, 128, 128] — covers 96×128×128 mm at 1×1×3 mm spacing
+# ============================================================
+
+experiment:
+  name:  "monai_diffusion_3d"
+  fold:  0
+  seed:  42
+
+# ── Data ────────────────────────────────────────────────────
+data:
+  data_dirs:
+    - "/pvc/data/synthRAD2025_Task1_Train/Task1"
+    - "/pvc/data/synthRAD2025_Task1_Train_D/Task1"
+
+  folds_csv:          "/pvc/data/splits/folds.csv"
+
+  patch_size:         [32, 128, 128]   # D×H×W (D=32 slices at 3mm = 96mm coverage)
+  samples_per_volume: 8
+
+  augment:     true
+  num_workers: 8
+  pin_memory:  true
+
+# ── Model ───────────────────────────────────────────────────
+model:
+  name:               "monai_diffusion_3d"
+  in_channels:        2              # MR (1ch) + noisy CT (1ch)
+  out_channels:       1              # predicted noise ε
+  channels:           [64, 128, 256, 256]
+  attention_levels:   [false, false, true, true]
+  num_res_blocks:     2
+  num_head_channels:  32
+  norm_num_groups:    32
+  norm_eps:           1.0e-6
+  n_anatomy:          3
+  dropout_cattn:      0.0
+  use_flash_attention: true
+
+# ── Diffusion schedule ──────────────────────────────────────
+diffusion:
+  T:        1000
+  cosine_s: 0.008
+
+# ── Loss ────────────────────────────────────────────────────
+loss:
+  noise_mse_weight: 1.0
+  mae_weight:       0.25
+  ssim_weight:      0.25
+  snr_gamma:        5.0    # Min-SNR clamp (Hang et al. 2023)
+
+# ── EMA ─────────────────────────────────────────────────────
+ema:
+  enabled: true
+  decay:   0.999
+
+# ── Training ────────────────────────────────────────────────
+training:
+  max_steps:              100000   # ~400 epochs × 250 steps
+  steps_per_log:          100
+  steps_per_val:          2500     # quick DDIM val every 2.5k steps
+  steps_per_save:         5000
+  batch_size:             2
+  gradient_accumulation:  2        # effective batch = 4 patches
+  use_amp:                true
+  val_ddim_steps:         10       # fast val (quality check only)
+  infer_ddim_steps:       50       # full DDIM for final evaluation
+
+# ── Optimiser ───────────────────────────────────────────────
+optimizer:
+  name:         "adamw"
+  lr:           1.0e-4
+  weight_decay: 1.0e-4
+  betas:        [0.9, 0.999]
+
+# ── LR scheduler ────────────────────────────────────────────
+scheduler:
+  name:         "constant_with_warmup"
+  warmup_steps: 2500
+
+# ── Sliding window inference ─────────────────────────────────
+inference:
+  roi_size:      [32, 128, 128]
+  sw_batch_size: 4
+  overlap:       0.5
+  mode:          "gaussian"
+
+# ── Output ──────────────────────────────────────────────────
+output:
+  checkpoint_dir: "/pvc/checkpoints/monai_diffusion_3d"
+  save_best:      true
