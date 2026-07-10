@@ -4,10 +4,10 @@
 # Closest match to Faking_it (rank 7, best diffusion in challenge):
 #   - VS-DDPM: variable step buckets [50,100,250,500,1000] per batch
 #   - VLB: backbone predicts noise + log-variance (out_channels=2)
-#   - Larger backbone: [64,128,256,512], attention at 3 levels, 3 res blocks
+#   - Backbone: [64,128,256,256], attention at 3 levels, 3 res blocks
 #   - Cosine LR with warmup
 #
-# Memory: ~200M params. Use batch_size=1 + grad_accum=4 (effective=4).
+# Memory: ~140M params. Fits 16GB GPU. batch_size=1 + grad_accum=4 (effective=4).
 # Runs in parallel with dynunet_v2 CNN track.
 # ============================================================
 
@@ -37,7 +37,7 @@ data:
 model:
   in_channels:        2       # MR + noisy CT (channel concat)
   out_channels:       2       # noise ε + log-variance v (for VLB)
-  channels:           [64, 128, 256, 512]
+  channels:           [64, 128, 256, 256]
   attention_levels:   [false, true, true, true]
   num_res_blocks:     3
   num_head_channels:  64
@@ -68,7 +68,7 @@ training:
   use_amp:               true
   steps_per_log:         100
   steps_per_val:         2500
-  steps_per_save:        5000
+  steps_per_save:        999999  # disabled — only best and last are saved
   val_ddim_steps:        10
 
 # ── Optimiser ───────────────────────────────────────────────

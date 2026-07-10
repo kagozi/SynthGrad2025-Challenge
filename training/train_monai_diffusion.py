@@ -272,7 +272,7 @@ def train(cfg: dict, fold: int, resume: str = None):
 
     log_every   = tc.get("steps_per_log",  100)
     val_every   = tc.get("steps_per_val",  2500)
-    save_every  = tc.get("steps_per_save", 5000)
+    save_every  = tc.get("steps_per_save", 999999)
     val_steps   = tc.get("val_ddim_steps", 10)
 
     ckpt_dir    = Path(cfg["output"]["checkpoint_dir"])
@@ -386,18 +386,19 @@ def train(cfg: dict, fold: int, resume: str = None):
 
             if mae < best_mae:
                 best_mae = mae
-                _save(ckpt_dir / f"fold{fold}_best.pth",
-                      diffusion, optimizer, scheduler, ema, global_step, best_mae, cfg)
-                print(f"  New best MAE: {best_mae:.2f} HU — saved.")
-
-        # ── Periodic save ─────────────────────────────────────────────────────
-        if global_step % save_every == 0:
-            _save(ckpt_dir / f"fold{fold}_step{global_step}.pth",
-                  diffusion, optimizer, scheduler, ema, global_step, best_mae, cfg)
+                try:
+                    _save(ckpt_dir / f"fold{fold}_best.pth",
+                          diffusion, optimizer, scheduler, ema, global_step, best_mae, cfg)
+                    print(f"  New best MAE: {best_mae:.2f} HU — saved.")
+                except Exception as e:
+                    print(f"  WARNING: failed to save best checkpoint: {e}")
 
     pbar.close()
-    _save(ckpt_dir / f"fold{fold}_last.pth",
-          diffusion, optimizer, scheduler, ema, global_step, best_mae, cfg)
+    try:
+        _save(ckpt_dir / f"fold{fold}_last.pth",
+              diffusion, optimizer, scheduler, ema, global_step, best_mae, cfg)
+    except Exception as e:
+        print(f"  WARNING: failed to save last checkpoint: {e}")
     wandb.finish()
     print(f"Training complete. Best val MAE: {best_mae:.2f} HU")
 

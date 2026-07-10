@@ -559,32 +559,41 @@ def train(cfg: dict, fold: int, resume: str = None, finetune_from: str = None):
             if cfg["output"]["save_best"] and val_mae < best_mae:
                 best_mae  = val_mae
                 ckpt_path = ckpt_dir / f"fold{fold}_best.pth"
+                try:
+                    torch.save({
+                        "epoch":    epoch,
+                        "model":    model.state_dict(),
+                        "optimizer":optimizer.state_dict(),
+                        "best_mae": best_mae,
+                        "config":   cfg,
+                    }, ckpt_path)
+                    print(f"  Saved best (MAE={best_mae:.2f}) → {ckpt_path}")
+                    wandb.run.summary["best_val_mae"] = best_mae
+                except Exception as e:
+                    print(f"  WARNING: failed to save best checkpoint: {e}")
+
+        if (epoch + 1) % tc["save_every_n_epochs"] == 0:
+            try:
                 torch.save({
                     "epoch":    epoch,
                     "model":    model.state_dict(),
                     "optimizer":optimizer.state_dict(),
                     "best_mae": best_mae,
                     "config":   cfg,
-                }, ckpt_path)
-                print(f"  Saved best (MAE={best_mae:.2f}) → {ckpt_path}")
-                wandb.run.summary["best_val_mae"] = best_mae
+                }, ckpt_dir / f"fold{fold}_epoch{epoch+1:03d}.pth")
+            except Exception as e:
+                print(f"  WARNING: failed to save epoch checkpoint: {e}")
 
-        if (epoch + 1) % tc["save_every_n_epochs"] == 0:
+        try:
             torch.save({
                 "epoch":    epoch,
                 "model":    model.state_dict(),
                 "optimizer":optimizer.state_dict(),
                 "best_mae": best_mae,
                 "config":   cfg,
-            }, ckpt_dir / f"fold{fold}_epoch{epoch+1:03d}.pth")
-
-        torch.save({
-            "epoch":    epoch,
-            "model":    model.state_dict(),
-            "optimizer":optimizer.state_dict(),
-            "best_mae": best_mae,
-            "config":   cfg,
-        }, ckpt_dir / f"fold{fold}_last.pth")
+            }, ckpt_dir / f"fold{fold}_last.pth")
+        except Exception as e:
+            print(f"  WARNING: failed to save last checkpoint: {e}")
 
     wandb.finish()
     print(f"\n[Train] Done. Best val MAE: {best_mae:.2f} HU")

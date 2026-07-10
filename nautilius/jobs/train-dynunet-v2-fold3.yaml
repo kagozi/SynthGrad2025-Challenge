@@ -39,9 +39,8 @@ spec:
             - "training/configs/dynunet_v2.yaml"
             - "--fold"
             - "3"
-            # Uncomment to resume:
-            # - "--resume"
-            # - "/pvc/checkpoints/dynunet_v2/fold3_last.pth"
+            - "--resume"
+            - "/pvc/checkpoints/dynunet_v2/fold3_epoch500.pth"
           env:
             - name: WANDB_API_KEY
               valueFrom:
