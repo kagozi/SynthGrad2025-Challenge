@@ -1,13 +1,13 @@
 # =============================================================================
-# MONAI 3D Diffusion Training — Fold 0
+# VS-DDPM 3D Training Job — Fold 4
 #
-#   kubectl apply -f nautilius/jobs/train-monai-diffusion-fold3.yaml
-#   kubectl logs -f job/synthrad2025-train-monai-diff-fold3
+#   kubectl apply -f nautilius/jobs/train-vs-ddpm-fold4.yaml
+#   kubectl logs -f job/synthrad2025-train-vs-ddpm-fold4
 # =============================================================================
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: synthrad2025-train-monai-diff-fold3
+  name: synthrad2025-train-vs-ddpm-fold4
 spec:
   backoffLimit: 0
   ttlSecondsAfterFinished: 86400
@@ -33,15 +33,12 @@ spec:
         - name: trainer
           image: ghcr.io/kagozi/synthrad2025-train:latest
           imagePullPolicy: Always
-          command: ["python", "training/train_monai_diffusion.py"]
+          command: ["python", "training/train_vs_ddpm.py"]
           args:
             - "--config"
-            - "training/configs/monai_diffusion_3d.yaml"
+            - "training/configs/vs_ddpm_3d.yaml"
             - "--fold"
-            - "3"
-            # Uncomment to resume:
-            # - "--resume"
-            # - "/pvc/checkpoints/monai_diffusion_3d/fold3_last.pth"
+            - "4"
           env:
             - name: WANDB_API_KEY
               valueFrom:
@@ -54,12 +51,12 @@ spec:
               value: "expandable_segments:True"
           resources:
             requests:
-              memory: "32Gi"
+              memory: "28Gi"
               cpu: "4"
               nvidia.com/gpu: "1"
             limits:
-              memory: "40Gi"
-              cpu: "6"
+              memory: "34Gi"
+              cpu: "5"
               nvidia.com/gpu: "1"
           volumeMounts:
             - name: synthrad2025-vol
@@ -73,7 +70,7 @@ spec:
         - name: dshm
           emptyDir:
             medium: Memory
-            sizeLimit: 16Gi
+            sizeLimit: 8Gi
       tolerations:
         - key: "nvidia.com/gpu"
           operator: "Exists"

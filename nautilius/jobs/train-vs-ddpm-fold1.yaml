@@ -1,16 +1,13 @@
 # =============================================================================
-# MONAI 3D Diffusion v2 Training — Fold 0
+# VS-DDPM 3D Training Job — Fold 1
 #
-# VS-DDPM + VLB + larger backbone [64,128,256,512].
-# Closest match to Faking_it (rank 7 in SynthRAD2025 challenge).
-#
-#   kubectl apply -f nautilius/jobs/train-monai-diffusion-v2-fold0.yaml
-#   kubectl logs -f job/synthrad2025-train-monai-diff-v2-fold0
+#   kubectl apply -f nautilius/jobs/train-vs-ddpm-fold1.yaml
+#   kubectl logs -f job/synthrad2025-train-vs-ddpm-fold1
 # =============================================================================
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: synthrad2025-train-monai-diff-v2-fold0
+  name: synthrad2025-train-vs-ddpm-fold1
 spec:
   backoffLimit: 0
   ttlSecondsAfterFinished: 86400
@@ -36,15 +33,12 @@ spec:
         - name: trainer
           image: ghcr.io/kagozi/synthrad2025-train:latest
           imagePullPolicy: Always
-          command: ["python", "training/train_monai_diffusion.py"]
+          command: ["python", "training/train_vs_ddpm.py"]
           args:
             - "--config"
-            - "training/configs/monai_diffusion_3d_v2.yaml"
+            - "training/configs/vs_ddpm_3d.yaml"
             - "--fold"
-            - "0"
-            # Uncomment to resume:
-            # - "--resume"
-            # - "/pvc/checkpoints/monai_diffusion_3d_v2/fold0_last.pth"
+            - "1"
           env:
             - name: WANDB_API_KEY
               valueFrom:
@@ -57,12 +51,12 @@ spec:
               value: "expandable_segments:True"
           resources:
             requests:
-              memory: "36Gi"
+              memory: "28Gi"
               cpu: "4"
               nvidia.com/gpu: "1"
             limits:
-              memory: "44Gi"
-              cpu: "6"
+              memory: "34Gi"
+              cpu: "5"
               nvidia.com/gpu: "1"
           volumeMounts:
             - name: synthrad2025-vol
@@ -76,7 +70,7 @@ spec:
         - name: dshm
           emptyDir:
             medium: Memory
-            sizeLimit: 16Gi
+            sizeLimit: 8Gi
       tolerations:
         - key: "nvidia.com/gpu"
           operator: "Exists"
