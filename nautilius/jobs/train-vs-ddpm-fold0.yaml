@@ -51,11 +51,11 @@ spec:
               value: "expandable_segments:True"
           resources:
             requests:
-              memory: "28Gi"
+              memory: "14Gi"
               cpu: "4"
               nvidia.com/gpu: "1"
             limits:
-              memory: "34Gi"
+              memory: "17Gi"
               cpu: "5"
               nvidia.com/gpu: "1"
           volumeMounts:
