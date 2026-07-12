@@ -211,9 +211,7 @@ def validate(
             ct_hu   = denormalise_ct(ct_t[0, 0].cpu().numpy())
 
             all_mae.append(compute_mae(pred_hu, ct_hu))
-            all_ssim.append(compute_ms_ssim(
-                pred[0:1].cpu(), ct_t[0:1].cpu()
-            ).item())
+            all_ssim.append(compute_ms_ssim(pred_hu, ct_hu))
 
         except Exception as e:
             print(f"  [Val error] {case['case_id']}: {e}")

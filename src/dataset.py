@@ -400,32 +400,63 @@ class SynthRAD3DDataset(Dataset):
         ct_arr   = normalise_ct(ct_arr, mask=mask_bool)
         mask_arr = mask_bool.astype(np.float32)
 
-        D, H, W = mr_arr.shape
+        # Crop to body mask bounding box + margin so all patches contain anatomy
+        nz = np.argwhere(mask_bool)
+        if len(nz) > 0:
+            margin = 10
+            bbmin  = np.maximum(nz.min(axis=0) - margin, 0)
+            bbmax  = np.minimum(nz.max(axis=0) + 1 + margin,
+                                np.array(mr_arr.shape))
+            mr_arr   = mr_arr  [bbmin[0]:bbmax[0], bbmin[1]:bbmax[1], bbmin[2]:bbmax[2]]
+            ct_arr   = ct_arr  [bbmin[0]:bbmax[0], bbmin[1]:bbmax[1], bbmin[2]:bbmax[2]]
+            mask_arr = mask_arr[bbmin[0]:bbmax[0], bbmin[1]:bbmax[1], bbmin[2]:bbmax[2]]
+
         pd_, ph, pw = self.patch_size
 
-        # Ensure minimum size by padding if needed
-        def pad_if_needed(a, target_d, target_h, target_w):
-            dd = max(0, target_d - a.shape[0])
-            hh = max(0, target_h - a.shape[1])
-            ww = max(0, target_w - a.shape[2])
-            return np.pad(a, ((0, dd), (0, hh), (0, ww)))
+        # Pad to at least patch_size (CT background = -1.0 in normalised space)
+        def _pad(a, fill):
+            dd = max(0, pd_ - a.shape[0])
+            hh = max(0, ph  - a.shape[1])
+            ww = max(0, pw  - a.shape[2])
+            if dd == 0 and hh == 0 and ww == 0:
+                return a
+            return np.pad(a, ((0, dd), (0, hh), (0, ww)),
+                          mode="constant", constant_values=fill)
 
-        mr_arr   = pad_if_needed(mr_arr,   pd_, ph, pw)
-        ct_arr   = pad_if_needed(ct_arr,   pd_, ph, pw)
-        mask_arr = pad_if_needed(mask_arr, pd_, ph, pw)
+        mr_arr   = _pad(mr_arr,   0.0)
+        ct_arr   = _pad(ct_arr,  -1.0)
+        mask_arr = _pad(mask_arr, 0.0)
 
         d0 = random.randint(0, max(0, mr_arr.shape[0] - pd_))
         h0 = random.randint(0, max(0, mr_arr.shape[1] - ph))
         w0 = random.randint(0, max(0, mr_arr.shape[2] - pw))
 
-        mr   = mr_arr  [d0:d0+pd_, h0:h0+ph, w0:w0+pw]
-        ct   = ct_arr  [d0:d0+pd_, h0:h0+ph, w0:w0+pw]
-        mask = mask_arr[d0:d0+pd_, h0:h0+ph, w0:w0+pw]
+        mr   = mr_arr  [d0:d0+pd_, h0:h0+ph, w0:w0+pw].copy()
+        ct   = ct_arr  [d0:d0+pd_, h0:h0+ph, w0:w0+pw].copy()
+        mask = mask_arr[d0:d0+pd_, h0:h0+ph, w0:w0+pw].copy()
+
+        # 3D augmentation: random flips + MR intensity jitter
+        if self.augment:
+            # LR flip
+            if random.random() < 0.5:
+                mr   = mr  [:, :, ::-1].copy()
+                ct   = ct  [:, :, ::-1].copy()
+                mask = mask[:, :, ::-1].copy()
+            # AP flip
+            if random.random() < 0.3:
+                mr   = mr  [:, ::-1, :].copy()
+                ct   = ct  [:, ::-1, :].copy()
+                mask = mask[:, ::-1, :].copy()
+            # MR intensity jitter (CT HU must be preserved)
+            if random.random() < 0.5:
+                factor = random.uniform(0.85, 1.15)
+                shift  = random.uniform(-0.05, 0.05)
+                mr     = np.clip(mr * factor + shift, 0.0, 1.0)
 
         return {
-            "mr":          torch.from_numpy(mr[None]),
-            "ct":          torch.from_numpy(ct[None]),
-            "mask":        torch.from_numpy(mask[None]),
+            "mr":          torch.from_numpy(mr[None].copy()),
+            "ct":          torch.from_numpy(ct[None].copy()),
+            "mask":        torch.from_numpy(mask[None].copy()),
             "anatomy_idx": torch.tensor(ANATOMY_TO_IDX[anatomy], dtype=torch.long),
             "case_id":     case["case_id"],
         }

@@ -561,12 +561,22 @@ class GaussianDiffusion3D(nn.Module):
         L_vlb  = kl.mean()
 
         # ── x0_pred for MAE / SSIM ────────────────────────────────────────────
-        # Use the non-stop-grad eps_pred for reconstruction
+        # Use the non-stop-grad eps_pred for reconstruction.
+        # Restrict to low-noise timesteps (SNR > 1 ≈ t < T/2) to avoid
+        # unbounded gradients ∝ sqrt(1-ᾱ)/sqrt(ᾱ) at high t.
         x0_pred = (x_t - sqrt_1mab_t * eps_pred) / sqrt_ab_t.clamp(min=1e-8)
         x0_pred = x0_pred.clamp(-1.0, 1.0)
 
-        L_mae  = self._mae_loss(x0_pred, x0, mask)
-        L_ssim = self._ssim_loss(x0_pred, x0, mask)
+        snr     = self.alpha_bar[t] / (1.0 - self.alpha_bar[t] + 1e-8)  # (B,)
+        low_idx = (snr > 1.0).nonzero(as_tuple=True)[0]
+
+        if low_idx.numel() > 0:
+            m_low   = mask[low_idx] if mask is not None else None
+            L_mae   = self._mae_loss (x0_pred[low_idx], x0[low_idx], m_low)
+            L_ssim  = self._ssim_loss(x0_pred[low_idx], x0[low_idx], m_low)
+        else:
+            L_mae  = x0_pred.new_zeros(())
+            L_ssim = x0_pred.new_zeros(())
 
         total = (L_simple
                  + self.lambda_vlb  * L_vlb
