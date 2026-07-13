@@ -1,663 +1,1014 @@
 """
-3D Variable-Step DDPM (VS-DDPM) for MR → sCT synthesis — SynthRAD2025 Task 1.
+3D Variable-Step DDPM — faithful port of Faking_it (SynthRAD2025, Task 1, rank 7).
 
-Inspired by the Faking_it submission (SynthRAD2025 challenge winner):
-  - 3D patch-based denoising (128×128×32 patches)
-  - Swin-ViT-style 3D window attention in the U-Net backbone
-  - Epsilon + learned variance prediction (2-channel output)
-  - Loss: L_simple + 0.001 * L_VLB + L_MAE + L_SSIM
-  - Cosine noise schedule, DDIM deterministic sampler
-
-References:
-  Ho et al. 2020       — DDPM          (https://arxiv.org/abs/2006.11239)
-  Nichol & Dhariwal 2021 — Improved DDPM (https://arxiv.org/abs/2102.09672)
-  Song et al. 2020     — DDIM          (https://arxiv.org/abs/2010.02502)
-  Liu et al. 2021      — Swin Transformer (https://arxiv.org/abs/2103.14030)
+Key differences from the previous implementation:
+  - x_0 prediction   (was: ε-prediction)
+  - Linear β schedule (was: cosine)
+  - Stochastic DDPM   (was: DDIM)
+  - 5-level UNet, model_channels=64, channel_mult=(1,2,2,4,4)  (was: 4-level, 32ch)
+  - GroupNorm32, scale-shift FiLM, QKV attention at ds=16 & ds=8
+  - Anisotropic downsampling: (1,2,2) for first two levels, (2,2,2) for rest
+  - SpacedDiffusion for variable-T training
+  - Variance regularisation: 0.0001 * mean(model_var²)
 """
 
 from __future__ import annotations
 
+import enum
 import math
-from typing import Optional
+from typing import Optional, Sequence
 
-import torch
+import numpy as np
+import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
 
-# Import reusable losses from the project
-import sys
-from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-from src.losses import MAELoss, MSSSIMLoss
+
+# ── Utilities (from Faking_it util_network.py) ─────────────────────────────────
+
+class GroupNorm32(nn.GroupNorm):
+    def forward(self, x: th.Tensor) -> th.Tensor:
+        return super().forward(x.float()).type(x.dtype)
 
 
-# ── Time (sinusoidal) embedding ────────────────────────────────────────────────
-
-class SinusoidalEmbedding(nn.Module):
-    """Sinusoidal positional embedding for diffusion timesteps (copied from ddpm.py)."""
-
-    def __init__(self, dim: int):
-        super().__init__()
-        self.dim = dim
-
-    def forward(self, t: torch.Tensor) -> torch.Tensor:
-        device   = t.device
-        half_dim = self.dim // 2
-        emb      = math.log(10000) / (half_dim - 1)
-        emb      = torch.exp(torch.arange(half_dim, device=device) * -emb)
-        emb      = t.float()[:, None] * emb[None, :]   # (B, half_dim)
-        return torch.cat([emb.sin(), emb.cos()], dim=-1)  # (B, dim)
+def normalization(channels: int) -> nn.Module:
+    return GroupNorm32(32, channels)
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
-
-def _num_groups(channels: int, max_groups: int = 32) -> int:
-    """Return the largest divisor of `channels` that is ≤ max_groups."""
-    g = min(max_groups, channels)
-    while g > 1 and channels % g != 0:
-        g -= 1
-    return max(g, 1)
+def zero_module(module: nn.Module) -> nn.Module:
+    for p in module.parameters():
+        p.detach().zero_()
+    return module
 
 
-# ── 3D ResBlock ────────────────────────────────────────────────────────────────
+def conv_nd(dims: int, *args, **kwargs) -> nn.Module:
+    if dims == 1:
+        return nn.Conv1d(*args, **kwargs)
+    elif dims == 2:
+        return nn.Conv2d(*args, **kwargs)
+    elif dims == 3:
+        return nn.Conv3d(*args, **kwargs)
+    raise ValueError(f"unsupported dims: {dims}")
 
-class ResBlock3D(nn.Module):
-    """
-    3D ResBlock with GroupNorm, SiLU, and FiLM conditioning from time embedding.
 
-    Layout: norm → silu → conv3d → FiLM(time) → norm → silu → dropout → conv3d
-            + residual projection if in_ch ≠ out_ch
-    """
+def linear(*args, **kwargs) -> nn.Module:
+    return nn.Linear(*args, **kwargs)
 
-    def __init__(
-        self,
-        in_ch:        int,
-        out_ch:       int,
-        time_emb_dim: int,
-        groups:       int   = 32,
-        dropout:      float = 0.0,
-    ):
-        super().__init__()
-        self.norm1 = nn.GroupNorm(_num_groups(in_ch, groups), in_ch)
-        self.conv1 = nn.Conv3d(in_ch, out_ch, 3, padding=1)
 
-        # FiLM: time embedding → scale + shift for second norm
-        self.time_proj = nn.Sequential(
-            nn.SiLU(),
-            nn.Linear(time_emb_dim, out_ch * 2),
+def timestep_embedding(timesteps: th.Tensor, dim: int, max_period: int = 10000) -> th.Tensor:
+    half = dim // 2
+    freqs = th.exp(
+        -math.log(max_period) * th.arange(start=0, end=half, dtype=th.float32) / half
+    ).to(device=timesteps.device)
+    args = timesteps[:, None].float() * freqs[None]
+    embedding = th.cat([th.cos(args), th.sin(args)], dim=-1)
+    if dim % 2:
+        embedding = th.cat([embedding, th.zeros_like(embedding[:, :1])], dim=-1)
+    return embedding
+
+
+def mean_flat(tensor: th.Tensor) -> th.Tensor:
+    return tensor.mean(dim=list(range(1, len(tensor.shape))))
+
+
+def _checkpoint(func, inputs, params, flag):
+    if flag:
+        from torch.utils.checkpoint import checkpoint as th_ckpt
+        return th_ckpt(func, *inputs, use_reentrant=False)
+    return func(*inputs)
+
+
+# ── Diffusion math utilities ────────────────────────────────────────────────────
+
+def normal_kl(mean1, logvar1, mean2, logvar2) -> th.Tensor:
+    tensor = None
+    for obj in (mean1, logvar1, mean2, logvar2):
+        if isinstance(obj, th.Tensor):
+            tensor = obj
+            break
+    assert tensor is not None
+    logvar1, logvar2 = [
+        x if isinstance(x, th.Tensor) else th.tensor(x).to(tensor)
+        for x in (logvar1, logvar2)
+    ]
+    return 0.5 * (
+        -1.0 + logvar2 - logvar1
+        + th.exp(logvar1 - logvar2)
+        + ((mean1 - mean2) ** 2) * th.exp(-logvar2)
+    )
+
+
+def approx_standard_normal_cdf(x: th.Tensor) -> th.Tensor:
+    return 0.5 * (
+        1.0 + th.tanh(
+            th.sqrt(th.tensor(2.0 / math.pi, device=x.device))
+            * (x + 0.044715 * th.pow(x, 3))
         )
-
-        self.norm2    = nn.GroupNorm(_num_groups(out_ch, groups), out_ch)
-        self.drop     = nn.Dropout(dropout)
-        self.conv2    = nn.Conv3d(out_ch, out_ch, 3, padding=1)
-        self.residual = nn.Conv3d(in_ch, out_ch, 1) if in_ch != out_ch else nn.Identity()
-
-    def forward(self, x: torch.Tensor, temb: torch.Tensor) -> torch.Tensor:
-        h = self.conv1(F.silu(self.norm1(x)))
-
-        # FiLM conditioning — broadcast over D, H, W
-        scale, shift = self.time_proj(temb).chunk(2, dim=-1)
-        h = self.norm2(h) * (1.0 + scale[:, :, None, None, None]) \
-                          + shift[:, :, None, None, None]
-
-        h = self.conv2(self.drop(F.silu(h)))
-        return h + self.residual(x)
+    )
 
 
-# ── 3D Window Attention ────────────────────────────────────────────────────────
+def discretized_gaussian_log_likelihood(x, *, means, log_scales) -> th.Tensor:
+    assert x.shape == means.shape == log_scales.shape
+    centered_x = x - means
+    inv_stdv = th.exp(-log_scales)
+    plus_in = inv_stdv * (centered_x + 1.0 / 255.0)
+    cdf_plus = approx_standard_normal_cdf(plus_in)
+    min_in = inv_stdv * (centered_x - 1.0 / 255.0)
+    cdf_min = approx_standard_normal_cdf(min_in)
+    log_cdf_plus = th.log(cdf_plus.clamp(min=1e-12))
+    log_one_minus_cdf_min = th.log((1.0 - cdf_min).clamp(min=1e-12))
+    cdf_delta = cdf_plus - cdf_min
+    log_probs = th.where(
+        x < -0.999,
+        log_cdf_plus,
+        th.where(x > 0.999, log_one_minus_cdf_min, th.log(cdf_delta.clamp(min=1e-12))),
+    )
+    return log_probs
 
-class WindowAttention3D(nn.Module):
-    """
-    3D window-based multi-head self-attention (Swin-style).
 
-    Partitions the (D, H, W) volume into non-overlapping windows and runs
-    self-attention within each window.  Handles non-divisible spatial sizes
-    by symmetric padding before partitioning and cropping after.
+def _extract_into_tensor(arr, timesteps: th.Tensor, broadcast_shape: tuple) -> th.Tensor:
+    res = th.from_numpy(arr).to(device=timesteps.device)[timesteps].float()
+    while len(res.shape) < len(broadcast_shape):
+        res = res[..., None]
+    return res.expand(broadcast_shape)
 
-    Args:
-        dim:         number of input channels
-        window_size: (wd, wh, ww) window dimensions in voxels
-        num_heads:   number of attention heads
-        groups:      GroupNorm groups for pre-norm
-    """
 
-    def __init__(
-        self,
-        dim:         int,
-        window_size: tuple = (4, 4, 4),
-        num_heads:   int   = 8,
-        groups:      int   = 32,
-    ):
-        super().__init__()
-        self.window_size = window_size
-        self.norm        = nn.GroupNorm(_num_groups(dim, groups), dim)
-        self.qkv         = nn.Linear(dim, dim * 3)
-        self.proj        = nn.Linear(dim, dim)
-        self.num_heads   = num_heads
-        self.head_dim    = dim // num_heads
-        self.scale       = self.head_dim ** -0.5
+# ── Enum types ─────────────────────────────────────────────────────────────────
 
-    @staticmethod
-    def _pad_to_multiple(
-        x: torch.Tensor,
-        window_size: tuple,
-    ) -> tuple[torch.Tensor, tuple]:
-        """Pad spatial dims to be divisible by window_size.  Returns (padded, padding)."""
-        _, _, D, H, W = x.shape
-        wd, wh, ww    = window_size
+class ModelMeanType(enum.Enum):
+    START_X = enum.auto()
+    EPSILON = enum.auto()
+    PREVIOUS_X = enum.auto()
 
-        pd = (wd - D % wd) % wd
-        ph = (wh - H % wh) % wh
-        pw = (ww - W % ww) % ww
 
-        if pd > 0 or ph > 0 or pw > 0:
-            # F.pad pads the last dims in reverse order: (W_before, W_after, H_before, ...)
-            x = F.pad(x, (0, pw, 0, ph, 0, pd))
+class ModelVarType(enum.Enum):
+    LEARNED_RANGE = enum.auto()
+    FIXED_SMALL = enum.auto()
+    FIXED_LARGE = enum.auto()
 
-        return x, (pd, ph, pw)
 
-    @staticmethod
-    def _partition_windows(
-        x: torch.Tensor,
-        window_size: tuple,
-    ) -> tuple[torch.Tensor, tuple]:
-        """
-        x: (B, C, D, H, W) → windows: (B*nW, wd*wh*ww, C)
+class LossType(enum.Enum):
+    MSE = enum.auto()
+    RESCALED_MSE = enum.auto()
 
-        Returns (windows, (B, D, H, W, nD, nH, nW)) for reversing.
-        """
-        B, C, D, H, W = x.shape
-        wd, wh, ww     = window_size
 
-        nD = D // wd
-        nH = H // wh
-        nW = W // ww
+# ── U-Net building blocks ───────────────────────────────────────────────────────
 
-        # (B, C, nD, wd, nH, wh, nW, ww)
-        x = x.reshape(B, C, nD, wd, nH, wh, nW, ww)
-        # → (B, nD, nH, nW, wd, wh, ww, C)
-        x = x.permute(0, 2, 4, 6, 3, 5, 7, 1).contiguous()
-        # → (B*nD*nH*nW, wd*wh*ww, C)
-        x = x.reshape(B * nD * nH * nW, wd * wh * ww, C)
+class TimestepBlock(nn.Module):
+    def forward(self, x: th.Tensor, emb: th.Tensor) -> th.Tensor:
+        raise NotImplementedError
 
-        return x, (B, D, H, W, nD, nH, nW)
 
-    @staticmethod
-    def _reverse_windows(
-        windows: torch.Tensor,
-        meta: tuple,
-        window_size: tuple,
-    ) -> torch.Tensor:
-        """Reverse _partition_windows. Returns (B, C, D, H, W)."""
-        B, D, H, W, nD, nH, nW = meta
-        wd, wh, ww              = window_size
-        C                       = windows.shape[-1]
-
-        # (B*nD*nH*nW, wd*wh*ww, C) → (B, nD, nH, nW, wd, wh, ww, C)
-        x = windows.reshape(B, nD, nH, nW, wd, wh, ww, C)
-        # → (B, C, nD, wd, nH, wh, nW, ww)
-        x = x.permute(0, 7, 1, 4, 2, 5, 3, 6).contiguous()
-        # → (B, C, D, H, W)
-        x = x.reshape(B, C, D, H, W)
+class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
+    def forward(self, x: th.Tensor, emb: th.Tensor) -> th.Tensor:
+        for layer in self:
+            if isinstance(layer, TimestepBlock):
+                x = layer(x, emb)
+            else:
+                x = layer(x)
         return x
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """x: (B, C, D, H, W) → (B, C, D, H, W)"""
-        B, C, D, H, W = x.shape
 
-        # 1. Pre-norm (GroupNorm on channel dim)
-        h = self.norm(x)
+class Downsample(nn.Module):
+    """Nearest-neighbour fractional downsample via th.nn.Upsample(scale<1)."""
 
-        # 2. Pad to multiples of window_size
-        h, (pd, ph, pw) = self._pad_to_multiple(h, self.window_size)
-        _, _, Dp, Hp, Wp = h.shape
+    def __init__(self, channels: int, sample_kernel: Sequence[int], dims: int = 3):
+        super().__init__()
+        self.channels = channels
+        scale = tuple(1.0 / k for k in sample_kernel)
+        self.op = th.nn.Upsample(scale_factor=scale, mode="nearest")
 
-        # 3. Partition into windows: (B*nW, L, C)
-        windows, meta = self._partition_windows(h, self.window_size)
-
-        # 4. Multi-head attention
-        L = windows.shape[1]
-        qkv = self.qkv(windows)                          # (B*nW, L, 3*C)
-        qkv = qkv.reshape(windows.shape[0], L, 3, self.num_heads, self.head_dim)
-        qkv = qkv.permute(2, 0, 3, 1, 4)                # (3, B*nW, heads, L, head_dim)
-        q, k, v = qkv.unbind(0)
-
-        attn = (q @ k.transpose(-2, -1)) * self.scale    # (B*nW, heads, L, L)
-        attn = attn.softmax(dim=-1)
-
-        out = (attn @ v)                                  # (B*nW, heads, L, head_dim)
-        out = out.transpose(1, 2).reshape(windows.shape[0], L, C)
-        out = self.proj(out)                              # (B*nW, L, C)
-
-        # 5. Reverse windows
-        out = self._reverse_windows(out, meta, self.window_size)  # (B, C, Dp, Hp, Wp)
-
-        # 6. Unpad
-        if pd > 0 or ph > 0 or pw > 0:
-            out = out[:, :, :D, :H, :W].contiguous()
-
-        # 7. Residual add
-        return x + out
+    def forward(self, x: th.Tensor) -> th.Tensor:
+        assert x.shape[1] == self.channels
+        return self.op(x)
 
 
-# ── 3D U-Net backbone ──────────────────────────────────────────────────────────
+class Upsample(nn.Module):
+    """Nearest-neighbour upsample — channel count unchanged."""
 
-class DDPMUNet3D(nn.Module):
-    """
-    3D Denoising U-Net for VS-DDPM.
+    def __init__(self, channels: int, sample_kernel: Sequence[int], dims: int = 3):
+        super().__init__()
+        self.channels = channels
+        self.op = th.nn.Upsample(scale_factor=tuple(sample_kernel), mode="nearest")
 
-    Architecture:
-      channels = [32, 64, 128, 256]
+    def forward(self, x: th.Tensor) -> th.Tensor:
+        assert x.shape[1] == self.channels
+        return self.op(x)
 
-      Encoder:
-        Level 0: 2×ResBlock3D(32→32)  → skip → DownConv3d(32,  64,  stride=(1,2,2))
-        Level 1: 2×ResBlock3D(64→64)  → skip → DownConv3d(64,  128, stride=(2,2,2))
-        Level 2: 2×ResBlock3D(128→128) + WindowAttn3D(128, w=4, h=4) → skip
-                 → DownConv3d(128, 256, stride=(2,2,2))
 
-      Bottleneck:
-        2×ResBlock3D(256,256) + WindowAttn3D(256, w=4, h=4)
-
-      Decoder (symmetric, trilinear upsample + concat skip):
-        Level 2: concat(256+128) → 2×ResBlock3D(384→128) + WindowAttn3D(128)
-        Level 1: concat(128+64)  → 2×ResBlock3D(192→64)
-        Level 0: concat(64+32)   → 2×ResBlock3D(96→32)
-
-      Output: GroupNorm(32,32) → SiLU → Conv3d(32, 2, 3, p=1)
-              2 channels: [eps_pred, v_pred]  (epsilon + learned variance)
-
-    Args:
-        in_channels:   2  (MR + noisy CT concatenated channel-wise)
-        out_channels:  2  (eps + v for learned variance)
-        base_ch:       32
-        time_emb_dim:  256
-        n_anatomy:     3  (HN / TH / AB)
-        dropout:       0.0
-    """
+class ResBlock(TimestepBlock):
+    """Residual block with optional FiLM scale-shift norm conditioning."""
 
     def __init__(
         self,
-        in_channels:  int   = 2,
-        out_channels: int   = 2,
-        base_ch:      int   = 32,
-        time_emb_dim: int   = 256,
-        n_anatomy:    int   = 3,
-        dropout:      float = 0.0,
+        channels: int,
+        emb_channels: int,
+        dropout: float,
+        out_channels: Optional[int] = None,
+        use_scale_shift_norm: bool = False,
+        dims: int = 3,
+        use_checkpoint: bool = False,
+        up: bool = False,
+        down: bool = False,
+        sample_kernel: Optional[Sequence[int]] = None,
     ):
         super().__init__()
-        ch = [base_ch, base_ch * 2, base_ch * 4, base_ch * 8]  # [32, 64, 128, 256]
+        self.channels = channels
+        self.use_checkpoint = use_checkpoint
+        self.use_scale_shift_norm = use_scale_shift_norm
+        out_channels = out_channels or channels
+        self.out_channels = out_channels
 
-        # Time + anatomy embedding
-        self.time_emb = nn.Sequential(
-            SinusoidalEmbedding(base_ch),
-            nn.Linear(base_ch, time_emb_dim),
+        self.in_layers = nn.Sequential(
+            normalization(channels),
             nn.SiLU(),
-            nn.Linear(time_emb_dim, time_emb_dim),
+            conv_nd(dims, channels, out_channels, 3, padding=1),
         )
-        self.anat_emb = nn.Embedding(n_anatomy, time_emb_dim)
 
-        # Input projection
-        self.in_conv = nn.Conv3d(in_channels, ch[0], 3, padding=1)
+        self.updown = up or down
+        if up:
+            assert sample_kernel is not None
+            self.h_upd = Upsample(channels, sample_kernel, dims)
+            self.x_upd = Upsample(channels, sample_kernel, dims)
+        elif down:
+            assert sample_kernel is not None
+            self.h_upd = Downsample(channels, sample_kernel, dims)
+            self.x_upd = Downsample(channels, sample_kernel, dims)
+        else:
+            self.h_upd = self.x_upd = nn.Identity()
 
-        # ── Encoder ──────────────────────────────────────────────────────────
-        # Level 0: 32 → 32, then downsample to 64
-        self.enc0_res = nn.ModuleList([
-            ResBlock3D(ch[0], ch[0], time_emb_dim, dropout=dropout),
-            ResBlock3D(ch[0], ch[0], time_emb_dim, dropout=dropout),
-        ])
-        self.down0 = nn.Conv3d(ch[0], ch[1], 3, stride=(1, 2, 2), padding=1)
+        self.emb_layers = nn.Sequential(
+            nn.SiLU(),
+            linear(emb_channels, 2 * out_channels if use_scale_shift_norm else out_channels),
+        )
+        self.out_layers = nn.Sequential(
+            normalization(out_channels),
+            nn.SiLU(),
+            nn.Dropout(p=dropout),
+            zero_module(conv_nd(dims, out_channels, out_channels, 3, padding=1)),
+        )
 
-        # Level 1: 64 → 64, then downsample to 128
-        self.enc1_res = nn.ModuleList([
-            ResBlock3D(ch[1], ch[1], time_emb_dim, dropout=dropout),
-            ResBlock3D(ch[1], ch[1], time_emb_dim, dropout=dropout),
-        ])
-        self.down1 = nn.Conv3d(ch[1], ch[2], 3, stride=(2, 2, 2), padding=1)
+        if out_channels == channels:
+            self.skip_connection = nn.Identity()
+        else:
+            self.skip_connection = conv_nd(dims, channels, out_channels, 1)
 
-        # Level 2: 128 → 128 + window attention, then downsample to 256
-        self.enc2_res = nn.ModuleList([
-            ResBlock3D(ch[2], ch[2], time_emb_dim, dropout=dropout),
-            ResBlock3D(ch[2], ch[2], time_emb_dim, dropout=dropout),
-        ])
-        self.enc2_attn = WindowAttention3D(ch[2], window_size=(4, 4, 4), num_heads=4)
-        self.down2 = nn.Conv3d(ch[2], ch[3], 3, stride=(2, 2, 2), padding=1)
+    def forward(self, x: th.Tensor, emb: th.Tensor) -> th.Tensor:
+        return _checkpoint(self._forward, (x, emb), self.parameters(), self.use_checkpoint)
 
-        # ── Bottleneck ────────────────────────────────────────────────────────
-        self.mid_res1 = ResBlock3D(ch[3], ch[3], time_emb_dim, dropout=dropout)
-        self.mid_res2 = ResBlock3D(ch[3], ch[3], time_emb_dim, dropout=dropout)
-        self.mid_attn = WindowAttention3D(ch[3], window_size=(4, 4, 4), num_heads=8)
+    def _forward(self, x: th.Tensor, emb: th.Tensor) -> th.Tensor:
+        if self.updown:
+            in_rest, in_conv = self.in_layers[:-1], self.in_layers[-1]
+            h = in_rest(x)
+            h = self.h_upd(h)
+            x = self.x_upd(x)
+            h = in_conv(h)
+        else:
+            h = self.in_layers(x)
 
-        # ── Decoder ───────────────────────────────────────────────────────────
-        # Level 2: upsample 256 → concat(256+128)=384 → 128 + window attention
-        self.dec2_res = nn.ModuleList([
-            ResBlock3D(ch[3] + ch[2], ch[2], time_emb_dim, dropout=dropout),
-            ResBlock3D(ch[2],         ch[2], time_emb_dim, dropout=dropout),
-        ])
-        self.dec2_attn = WindowAttention3D(ch[2], window_size=(4, 4, 4), num_heads=4)
+        emb_out = self.emb_layers(emb).type(h.dtype)
+        while len(emb_out.shape) < len(h.shape):
+            emb_out = emb_out[..., None]
 
-        # Level 1: upsample 128 → concat(128+64)=192 → 64
-        self.dec1_res = nn.ModuleList([
-            ResBlock3D(ch[2] + ch[1], ch[1], time_emb_dim, dropout=dropout),
-            ResBlock3D(ch[1],         ch[1], time_emb_dim, dropout=dropout),
-        ])
+        if self.use_scale_shift_norm:
+            out_norm, out_rest = self.out_layers[0], self.out_layers[1:]
+            scale, shift = th.chunk(emb_out, 2, dim=1)
+            h = out_norm(h) * (1 + scale) + shift
+            h = out_rest(h)
+        else:
+            h = h + emb_out
+            h = self.out_layers(h)
 
-        # Level 0: upsample 64 → concat(64+32)=96 → 32
-        self.dec0_res = nn.ModuleList([
-            ResBlock3D(ch[1] + ch[0], ch[0], time_emb_dim, dropout=dropout),
-            ResBlock3D(ch[0],         ch[0], time_emb_dim, dropout=dropout),
-        ])
-
-        # Output head
-        self.out_norm = nn.GroupNorm(_num_groups(ch[0], 32), ch[0])
-        self.out_conv = nn.Conv3d(ch[0], out_channels, 3, padding=1)
-
-    def forward(
-        self,
-        x:           torch.Tensor,            # (B, 2, D, H, W)
-        t:           torch.Tensor,            # (B,) integer timestep
-        anatomy_idx: Optional[torch.Tensor] = None,   # (B,)
-    ) -> torch.Tensor:                        # (B, 2, D, H, W)
-        # Time + anatomy embedding
-        temb = self.time_emb(t)
-        if anatomy_idx is not None:
-            temb = temb + self.anat_emb(anatomy_idx)
-
-        h = self.in_conv(x)                  # (B, 32, D, H, W)
-
-        # ── Encoder ──────────────────────────────────────────────────────────
-        # Level 0
-        for r in self.enc0_res:
-            h = r(h, temb)
-        skip0 = h                             # (B, 32, D, H, W)
-        h = self.down0(h)                     # (B, 64, D, H/2, W/2)
-
-        # Level 1
-        for r in self.enc1_res:
-            h = r(h, temb)
-        skip1 = h                             # (B, 64, D, H/2, W/2)
-        h = self.down1(h)                     # (B, 128, D/2, H/4, W/4)
-
-        # Level 2
-        for r in self.enc2_res:
-            h = r(h, temb)
-        h = self.enc2_attn(h)
-        skip2 = h                             # (B, 128, D/2, H/4, W/4)
-        h = self.down2(h)                     # (B, 256, D/4, H/8, W/8)
-
-        # ── Bottleneck ────────────────────────────────────────────────────────
-        h = self.mid_res1(h, temb)
-        h = self.mid_res2(h, temb)
-        h = self.mid_attn(h)
-
-        # ── Decoder ───────────────────────────────────────────────────────────
-        # Level 2
-        h = F.interpolate(h, size=skip2.shape[2:], mode="trilinear", align_corners=False)
-        h = torch.cat([h, skip2], dim=1)      # (B, 384, ...)
-        for r in self.dec2_res:
-            h = r(h, temb)
-        h = self.dec2_attn(h)
-
-        # Level 1
-        h = F.interpolate(h, size=skip1.shape[2:], mode="trilinear", align_corners=False)
-        h = torch.cat([h, skip1], dim=1)      # (B, 192, ...)
-        for r in self.dec1_res:
-            h = r(h, temb)
-
-        # Level 0
-        h = F.interpolate(h, size=skip0.shape[2:], mode="trilinear", align_corners=False)
-        h = torch.cat([h, skip0], dim=1)      # (B, 96, ...)
-        for r in self.dec0_res:
-            h = r(h, temb)
-
-        return self.out_conv(F.silu(self.out_norm(h)))   # (B, 2, D, H, W)
+        return self.skip_connection(x) + h
 
 
-# ── Gaussian Diffusion (3D, VLB) ──────────────────────────────────────────────
+class QKVAttentionLegacy(nn.Module):
+    """Multi-head QKV attention (legacy head-splitting order)."""
 
-class GaussianDiffusion3D(nn.Module):
+    def __init__(self, n_heads: int):
+        super().__init__()
+        self.n_heads = n_heads
+
+    def forward(self, qkv: th.Tensor) -> th.Tensor:
+        bs, width, length = qkv.shape
+        assert width % (3 * self.n_heads) == 0
+        ch = width // (3 * self.n_heads)
+        q, k, v = qkv.reshape(bs * self.n_heads, ch * 3, length).split(ch, dim=1)
+        scale = 1 / math.sqrt(math.sqrt(ch))
+        weight = th.einsum("bct,bcs->bts", q * scale, k * scale)
+        weight = th.softmax(weight.float(), dim=-1).type(weight.dtype)
+        a = th.einsum("bts,bcs->bct", weight, v)
+        return a.reshape(bs, -1, length)
+
+
+class AttentionBlock(nn.Module):
+    """Full spatial self-attention with GroupNorm32 pre-norm.
+    Always uses gradient checkpointing to bound memory."""
+
+    def __init__(self, channels: int, num_heads: int = 4):
+        super().__init__()
+        self.channels = channels
+        self.num_heads = num_heads
+        self.norm = normalization(channels)
+        self.qkv = conv_nd(1, channels, channels * 3, 1)
+        self.attention = QKVAttentionLegacy(num_heads)
+        self.proj_out = zero_module(conv_nd(1, channels, channels, 1))
+
+    def forward(self, x: th.Tensor) -> th.Tensor:
+        return _checkpoint(self._forward, (x,), self.parameters(), True)
+
+    def _forward(self, x: th.Tensor) -> th.Tensor:
+        b, c, *spatial = x.shape
+        x = x.reshape(b, c, -1)
+        qkv = self.qkv(self.norm(x).float()).type(x.dtype)
+        h = self.attention(qkv)
+        h = self.proj_out(h.float()).type(x.dtype)
+        return (x + h).reshape(b, c, *spatial)
+
+
+# ── 3D UNet (Faking_it get_Unet architecture) ──────────────────────────────────
+
+class UNetModel3D(nn.Module):
     """
-    3D Gaussian diffusion with cosine noise schedule and learned variance (VLB).
+    5-level 3D U-Net matching Faking_it 'get_Unet':
+      model_channels=64, channel_mult=(1,2,2,4,4),
+      2 res-blocks per level, attention at ds=16 & ds=8,
+      anisotropic downsampling (D×H×W): (1,2,2) for levels 0-1, (2,2,2) for 2-4.
 
-    Training loss (p_loss) returns a dict:
-      'simple'  — MSE between predicted noise and true noise
-      'vlb'     — Improved DDPM VLB (KL divergence term)
-      'mae'     — L1 on x0_pred vs x0 in normalised [-1,1] space
-      'ssim'    — 1-MS-SSIM on x0_pred vs x0
-      'total'   — L_simple + 0.001*L_vlb + 1.0*L_mae + 1.0*L_ssim
+    image_size tracks the H dimension to know when to add attention.
+    """
 
-    Inference: deterministic DDIM (ddim_sample).
+    SAMPLE_KERNELS = [
+        [1, 2, 2],  # level 0 enc/dec
+        [1, 2, 2],  # level 1
+        [2, 2, 2],  # level 2
+        [2, 2, 2],  # level 3
+        [2, 2, 2],  # level 4  (unused for encoder — last level)
+    ]
+    CHANNEL_MULT   = (1, 2, 2, 4, 4)
+    NUM_RES_BLOCKS = 2
+    ATTENTION_DS   = {16, 8}   # add attention when ds ∈ this set
+
+    def __init__(
+        self,
+        in_channels:  int   = 2,    # MR + noisy CT
+        out_channels: int   = 2,    # x0_pred + log_var_interp
+        model_channels: int = 64,
+        dropout:      float = 0.2,
+        image_size:   int   = 128,  # H dimension of the patch
+    ):
+        super().__init__()
+        ch_mult = self.CHANNEL_MULT
+        n_res   = self.NUM_RES_BLOCKS
+        dims    = 3
+
+        time_embed_dim = model_channels * 4  # 256
+        self.time_embed = nn.Sequential(
+            linear(model_channels, time_embed_dim),
+            nn.SiLU(),
+            linear(time_embed_dim, time_embed_dim),
+        )
+
+        # ── Encoder ──────────────────────────────────────────────────────────
+        ch        = int(ch_mult[0] * model_channels)    # 64
+        input_ch  = ch
+        ds        = image_size
+
+        self.input_blocks = nn.ModuleList([
+            TimestepEmbedSequential(conv_nd(dims, in_channels, ch, 3, padding=1))
+        ])
+        input_block_chans = [ch]
+        self._feature_size = ch
+
+        for level, mult in enumerate(ch_mult):
+            for _ in range(n_res):
+                layers: list = [
+                    ResBlock(ch, time_embed_dim, dropout,
+                             out_channels=int(mult * model_channels),
+                             use_scale_shift_norm=True, dims=dims)
+                ]
+                ch = int(mult * model_channels)
+                if ds in self.ATTENTION_DS:
+                    layers.append(AttentionBlock(ch, num_heads=4))
+                self.input_blocks.append(TimestepEmbedSequential(*layers))
+                self._feature_size += ch
+                input_block_chans.append(ch)
+
+            if level != len(ch_mult) - 1:      # not last level → downsample
+                self.input_blocks.append(
+                    TimestepEmbedSequential(
+                        Downsample(ch, self.SAMPLE_KERNELS[level], dims=dims)
+                    )
+                )
+                input_block_chans.append(ch)
+                ds //= 2
+                self._feature_size += ch
+
+        # ── Bottleneck ────────────────────────────────────────────────────────
+        self.middle_block = TimestepEmbedSequential(
+            ResBlock(ch, time_embed_dim, dropout, use_scale_shift_norm=True, dims=dims),
+            AttentionBlock(ch, num_heads=4),
+            ResBlock(ch, time_embed_dim, dropout, use_scale_shift_norm=True, dims=dims),
+        )
+        self._feature_size += ch
+
+        # ── Decoder ───────────────────────────────────────────────────────────
+        self.output_blocks = nn.ModuleList([])
+        for level, mult in list(enumerate(ch_mult))[::-1]:
+            for i in range(n_res + 1):
+                ich = input_block_chans.pop()
+                layers = [
+                    ResBlock(ch + ich, time_embed_dim, dropout,
+                             out_channels=int(model_channels * mult),
+                             use_scale_shift_norm=True, dims=dims)
+                ]
+                ch = int(model_channels * mult)
+                if ds in self.ATTENTION_DS:
+                    layers.append(AttentionBlock(ch, num_heads=4))
+                if level and i == n_res:        # upsample at last block of each dec level
+                    layers.append(Upsample(ch, self.SAMPLE_KERNELS[level - 1], dims=dims))
+                    ds *= 2
+                self.output_blocks.append(TimestepEmbedSequential(*layers))
+                self._feature_size += ch
+
+        self.out = nn.Sequential(
+            normalization(ch),
+            nn.SiLU(),
+            zero_module(conv_nd(dims, input_ch, out_channels, 3, padding=1)),
+        )
+
+    def forward(self, x: th.Tensor, timesteps: th.Tensor) -> th.Tensor:
+        """
+        x         : (B, 2, D, H, W) — [noisy_ct | mr]
+        timesteps : (B,) — scaled to [0, 1000)
+        returns   : (B, 2, D, H, W) — [x0_pred | log_var_interp]
+        """
+        emb = self.time_embed(timestep_embedding(timesteps, self.out[0].num_groups * 2))
+        # time_embed input must match model_channels; GroupNorm32 groups == 32
+        # so model_channels = 64 → we need timestep_embedding(t, 64)
+        hs = []
+        h = x.type(th.float32)
+        for module in self.input_blocks:
+            h = module(h, emb)
+            hs.append(h)
+        h = self.middle_block(h, emb)
+        for module in self.output_blocks:
+            h = th.cat([h, hs.pop()], dim=1)
+            h = module(h, emb)
+        h = h.type(x.dtype)
+        return self.out(h)
+
+
+# Fix the embedding dimension bug: time_embed takes model_channels not GroupNorm groups
+# Override to pass correct dim
+class UNetModel3D(nn.Module):
+    """
+    5-level 3D U-Net matching Faking_it 'get_Unet':
+      model_channels=64, channel_mult=(1,2,2,4,4),
+      2 res-blocks per level, attention at ds=16 & ds=8,
+      anisotropic downsampling (D×H×W): (1,2,2) for levels 0-1, (2,2,2) for 2-4.
+    """
+
+    SAMPLE_KERNELS = [
+        [1, 2, 2],
+        [1, 2, 2],
+        [2, 2, 2],
+        [2, 2, 2],
+        [2, 2, 2],
+    ]
+    CHANNEL_MULT   = (1, 2, 2, 4, 4)
+    NUM_RES_BLOCKS = 2
+    ATTENTION_DS   = {16, 8}
+
+    def __init__(
+        self,
+        in_channels:    int   = 2,
+        out_channels:   int   = 2,
+        model_channels: int   = 64,
+        dropout:        float = 0.2,
+        image_size:     int   = 128,
+    ):
+        super().__init__()
+        self.model_channels = model_channels
+        ch_mult = self.CHANNEL_MULT
+        n_res   = self.NUM_RES_BLOCKS
+        dims    = 3
+
+        time_embed_dim = model_channels * 4   # 256
+
+        self.time_embed = nn.Sequential(
+            linear(model_channels, time_embed_dim),
+            nn.SiLU(),
+            linear(time_embed_dim, time_embed_dim),
+        )
+
+        ch       = int(ch_mult[0] * model_channels)
+        input_ch = ch
+        ds       = image_size
+
+        self.input_blocks = nn.ModuleList([
+            TimestepEmbedSequential(conv_nd(dims, in_channels, ch, 3, padding=1))
+        ])
+        input_block_chans = [ch]
+
+        for level, mult in enumerate(ch_mult):
+            for _ in range(n_res):
+                layers: list = [
+                    ResBlock(ch, time_embed_dim, dropout,
+                             out_channels=int(mult * model_channels),
+                             use_scale_shift_norm=True, dims=dims)
+                ]
+                ch = int(mult * model_channels)
+                if ds in self.ATTENTION_DS:
+                    layers.append(AttentionBlock(ch, num_heads=4))
+                self.input_blocks.append(TimestepEmbedSequential(*layers))
+                input_block_chans.append(ch)
+
+            if level != len(ch_mult) - 1:
+                self.input_blocks.append(
+                    TimestepEmbedSequential(
+                        Downsample(ch, self.SAMPLE_KERNELS[level], dims=dims)
+                    )
+                )
+                input_block_chans.append(ch)
+                ds //= 2
+
+        self.middle_block = TimestepEmbedSequential(
+            ResBlock(ch, time_embed_dim, dropout, use_scale_shift_norm=True, dims=dims),
+            AttentionBlock(ch, num_heads=4),
+            ResBlock(ch, time_embed_dim, dropout, use_scale_shift_norm=True, dims=dims),
+        )
+
+        self.output_blocks = nn.ModuleList([])
+        for level, mult in list(enumerate(ch_mult))[::-1]:
+            for i in range(n_res + 1):
+                ich = input_block_chans.pop()
+                layers = [
+                    ResBlock(ch + ich, time_embed_dim, dropout,
+                             out_channels=int(model_channels * mult),
+                             use_scale_shift_norm=True, dims=dims)
+                ]
+                ch = int(model_channels * mult)
+                if ds in self.ATTENTION_DS:
+                    layers.append(AttentionBlock(ch, num_heads=4))
+                if level and i == n_res:
+                    layers.append(Upsample(ch, self.SAMPLE_KERNELS[level - 1], dims=dims))
+                    ds *= 2
+                self.output_blocks.append(TimestepEmbedSequential(*layers))
+
+        self.out = nn.Sequential(
+            normalization(ch),
+            nn.SiLU(),
+            zero_module(conv_nd(dims, input_ch, out_channels, 3, padding=1)),
+        )
+
+    def forward(self, x: th.Tensor, timesteps: th.Tensor) -> th.Tensor:
+        emb = self.time_embed(
+            timestep_embedding(timesteps, self.model_channels)
+        )
+        hs = []
+        h = x
+        for module in self.input_blocks:
+            h = module(h, emb)
+            hs.append(h)
+        h = self.middle_block(h, emb)
+        for module in self.output_blocks:
+            h = th.cat([h, hs.pop()], dim=1)
+            h = module(h, emb)
+        return self.out(h)
+
+
+# ── Gaussian Diffusion ──────────────────────────────────────────────────────────
+
+class GaussianDiffusion:
+    """
+    IDDPM-style Gaussian diffusion.
+    - predict_xstart=True  (x_0 prediction)
+    - learn_sigma=True     (LEARNED_RANGE variance)
+    - loss_type=RESCALED_MSE
+    - rescale_timesteps=True (SpacedDiffusion remaps t to [0,1000))
     """
 
     def __init__(
         self,
-        model:          DDPMUNet3D,
-        T:              int   = 1000,
-        s:              float = 0.008,   # cosine schedule offset
-        lambda_vlb:     float = 0.001,
-        lambda_mae:     float = 1.0,
-        lambda_ssim:    float = 1.0,
+        *,
+        betas:           np.ndarray,
+        model_mean_type: ModelMeanType   = ModelMeanType.START_X,
+        model_var_type:  ModelVarType    = ModelVarType.LEARNED_RANGE,
+        loss_type:       LossType        = LossType.RESCALED_MSE,
+        rescale_timesteps: bool          = True,
     ):
-        super().__init__()
-        self.model       = model
-        self.T           = T
-        self.lambda_vlb  = lambda_vlb
-        self.lambda_mae  = lambda_mae
-        self.lambda_ssim = lambda_ssim
+        self.model_mean_type   = model_mean_type
+        self.model_var_type    = model_var_type
+        self.loss_type         = loss_type
+        self.rescale_timesteps = rescale_timesteps
 
-        # ── Cosine noise schedule ──────────────────────────────────────────────
-        t_arr     = torch.arange(T + 1, dtype=torch.float64)
-        f         = torch.cos((t_arr / T + s) / (1.0 + s) * math.pi * 0.5) ** 2
-        alpha_bar = f / f[0]
-        betas     = (1.0 - alpha_bar[1:] / alpha_bar[:-1]).clamp(max=0.999)
-        alphas    = 1.0 - betas
-        alpha_bar = alpha_bar[1:].float()   # length T (ᾱ_1 … ᾱ_T)
+        betas = np.array(betas, dtype=np.float64)
+        self.betas = betas
+        self.num_timesteps = int(betas.shape[0])
 
-        # ᾱ_{t-1}: shift right by 1, with ᾱ_0 = 1.0  (needed for posterior)
-        alpha_bar_prev = torch.cat([
-            torch.ones(1, dtype=torch.float32),
-            alpha_bar[:-1],
-        ])  # length T
+        alphas                = 1.0 - betas
+        self.alphas_cumprod   = np.cumprod(alphas, axis=0)
+        self.alphas_cumprod_prev = np.append(1.0, self.alphas_cumprod[:-1])
+        self.alphas_cumprod_next = np.append(self.alphas_cumprod[1:], 0.0)
 
-        # β̃_t = (1 - ᾱ_{t-1}) / (1 - ᾱ_t) * β_t  (posterior variance)
-        beta_tilde = (1.0 - alpha_bar_prev) / (1.0 - alpha_bar) * betas.float()
-        # For t=0 the posterior degenerates to β_1, so clamp ≥ β_1
-        beta_tilde = beta_tilde.clamp(min=betas[0].item())
+        self.sqrt_alphas_cumprod        = np.sqrt(self.alphas_cumprod)
+        self.sqrt_one_minus_alphas_cumprod = np.sqrt(1.0 - self.alphas_cumprod)
+        self.log_one_minus_alphas_cumprod  = np.log(1.0 - self.alphas_cumprod)
+        self.sqrt_recip_alphas_cumprod  = np.sqrt(1.0 / self.alphas_cumprod)
+        self.sqrt_recipm1_alphas_cumprod = np.sqrt(1.0 / self.alphas_cumprod - 1)
 
-        self.register_buffer("betas",           betas.float())
-        self.register_buffer("alphas",          alphas.float())
-        self.register_buffer("alpha_bar",       alpha_bar)
-        self.register_buffer("alpha_bar_prev",  alpha_bar_prev)
-        self.register_buffer("sqrt_ab",         alpha_bar.sqrt())
-        self.register_buffer("sqrt_1mab",       (1.0 - alpha_bar).sqrt())
-        self.register_buffer("sqrt_alphas",     alphas.float().sqrt())
-        # For VLB
-        self.register_buffer("log_betas",       betas.float().log())
-        self.register_buffer("log_beta_tilde",  beta_tilde.log())
+        self.posterior_variance = (
+            betas * (1.0 - self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
+        )
+        self.posterior_log_variance_clipped = np.log(
+            np.append(self.posterior_variance[1], self.posterior_variance[1:])
+        )
+        self.posterior_mean_coef1 = (
+            betas * np.sqrt(self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
+        )
+        self.posterior_mean_coef2 = (
+            (1.0 - self.alphas_cumprod_prev) * np.sqrt(alphas) / (1.0 - self.alphas_cumprod)
+        )
 
-        # Precomputed loss helpers
-        self._mae_loss  = MAELoss()
-        self._ssim_loss = MSSSIMLoss()
+    def _scale_timesteps(self, t: th.Tensor) -> th.Tensor:
+        if self.rescale_timesteps:
+            return t.float() * (1000.0 / self.num_timesteps)
+        return t
 
-    # ── Forward (noising) ─────────────────────────────────────────────────────
-
-    def q_sample(
-        self,
-        x0:    torch.Tensor,   # (B, 1, D, H, W) clean CT in [-1, 1]
-        t:     torch.Tensor,   # (B,) long
-        noise: Optional[torch.Tensor] = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def q_sample(self, x_start: th.Tensor, t: th.Tensor,
+                 noise: Optional[th.Tensor] = None) -> th.Tensor:
         if noise is None:
-            noise = torch.randn_like(x0)
-        sqrt_ab   = self.sqrt_ab[t][:, None, None, None, None]
-        sqrt_1mab = self.sqrt_1mab[t][:, None, None, None, None]
-        return sqrt_ab * x0 + sqrt_1mab * noise, noise
+            noise = th.randn_like(x_start)
+        return (
+            _extract_into_tensor(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start
+            + _extract_into_tensor(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape) * noise
+        )
 
-    # ── Training loss ─────────────────────────────────────────────────────────
+    def q_posterior_mean_variance(self, x_start: th.Tensor, x_t: th.Tensor, t: th.Tensor):
+        posterior_mean = (
+            _extract_into_tensor(self.posterior_mean_coef1, t, x_t.shape) * x_start
+            + _extract_into_tensor(self.posterior_mean_coef2, t, x_t.shape) * x_t
+        )
+        posterior_variance         = _extract_into_tensor(self.posterior_variance, t, x_t.shape)
+        posterior_log_var_clipped  = _extract_into_tensor(
+            self.posterior_log_variance_clipped, t, x_t.shape
+        )
+        return posterior_mean, posterior_variance, posterior_log_var_clipped
 
-    def p_loss(
+    def p_mean_variance(
         self,
-        x0:          torch.Tensor,                   # (B, 1, D, H, W) clean CT
-        mr:          torch.Tensor,                   # (B, 1, D, H, W) MR conditioning
-        t:           torch.Tensor,                   # (B,) long
-        anatomy_idx: Optional[torch.Tensor] = None,  # (B,)
-        mask:        Optional[torch.Tensor] = None,  # (B, 1, D, H, W)
+        model:         UNetModel3D,
+        x:             th.Tensor,          # (B,1,D,H,W) noisy CT
+        t:             th.Tensor,          # (B,) spaced-t indices
+        condition:     th.Tensor,          # (B,1,D,H,W) MR in [-1,1]
+        clip_denoised: bool = True,
     ) -> dict:
-        noise  = torch.randn_like(x0)
-        x_t, _ = self.q_sample(x0, t, noise)
+        B, C = x.shape[:2]
+        x_input = th.cat([x, condition], dim=1)
+        model_output = model(x_input, self._scale_timesteps(t))
 
-        x_in = torch.cat([mr, x_t], dim=1)           # (B, 2, D, H, W)
-        out  = self.model(x_in, t, anatomy_idx)       # (B, 2, D, H, W)
+        assert model_output.shape == (B, C * 2, *x.shape[2:])
+        model_output, model_var_values = th.split(model_output, C, dim=1)
 
-        eps_pred = out[:, :1]    # predicted noise
-        v_pred   = out[:, 1:]    # predicted log-variance interpolant
+        min_log = _extract_into_tensor(self.posterior_log_variance_clipped, t, x.shape)
+        max_log = _extract_into_tensor(np.log(self.betas), t, x.shape)
+        frac    = (model_var_values + 1) / 2
+        model_log_variance = frac * max_log + (1 - frac) * min_log
+        model_variance     = th.exp(model_log_variance)
 
-        # ── L_simple ─────────────────────────────────────────────────────────
-        diff = (eps_pred - noise) ** 2
-        if mask is not None:
-            L_simple = (diff * mask).sum() / (mask.sum() + 1e-8)
+        if self.model_mean_type == ModelMeanType.START_X:
+            pred_xstart = model_output.clamp(-1, 1) if clip_denoised else model_output
+        elif self.model_mean_type == ModelMeanType.EPSILON:
+            pred_xstart = self._predict_xstart_from_eps(x, t, model_output)
+            if clip_denoised:
+                pred_xstart = pred_xstart.clamp(-1, 1)
         else:
-            L_simple = diff.mean()
+            raise NotImplementedError(self.model_mean_type)
 
-        # ── VLB (Nichol & Dhariwal 2021) ─────────────────────────────────────
-        # Posterior log-variance: log β̃_t
-        log_var_q = self.log_beta_tilde[t][:, None, None, None, None]  # (B,1,1,1,1)
-
-        # Model log-variance: interpolate between log_beta and log_beta_tilde
-        # using the learned v_pred in [-1, 1]
-        frac      = (v_pred.clamp(-1.0, 1.0) + 1.0) / 2.0             # → [0, 1]
-        log_beta  = self.log_betas[t][:, None, None, None, None]
-        log_var_p = frac * log_beta + (1.0 - frac) * log_var_q
-
-        # Predicted x0 (stop gradient through eps_pred for VLB branch)
-        eps_pred_sg = eps_pred.detach()
-        sqrt_ab_t   = self.sqrt_ab[t][:, None, None, None, None]
-        sqrt_1mab_t = self.sqrt_1mab[t][:, None, None, None, None]
-
-        x0_recon = (x_t - sqrt_1mab_t * eps_pred_sg) / sqrt_ab_t.clamp(min=1e-8)
-        x0_recon = x0_recon.clamp(-1.0, 1.0)
-
-        # Posterior mean: μ̃_t(x_t, x0)
-        betas_t        = self.betas[t][:, None, None, None, None]
-        alphas_t       = self.alphas[t][:, None, None, None, None]
-        sqrt_alphas_t  = self.sqrt_alphas[t][:, None, None, None, None]
-        ab_prev_t      = self.alpha_bar_prev[t][:, None, None, None, None]
-        ab_t           = self.alpha_bar[t][:, None, None, None, None]
-
-        coef1  = ab_prev_t.sqrt() * betas_t / (1.0 - ab_t)
-        coef2  = alphas_t.sqrt() * (1.0 - ab_prev_t) / (1.0 - ab_t)
-        mu_q   = coef1 * x0 + coef2 * x_t
-
-        # Model mean: μ_θ from eps prediction (with stop grad)
-        mu_p   = (x_t - betas_t / sqrt_1mab_t.clamp(min=1e-8) * eps_pred_sg) \
-                 / sqrt_alphas_t.clamp(min=1e-8)
-
-        # KL divergence (Gaussian, per element)
-        var_q  = log_var_q.exp()
-        var_p  = log_var_p.exp()
-        kl     = (log_var_p - log_var_q
-                  + var_q / var_p.clamp(min=1e-8)
-                  + (mu_q - mu_p).pow(2) / var_p.clamp(min=1e-8)
-                  - 1.0) * 0.5
-        L_vlb  = kl.mean()
-
-        # ── x0_pred for MAE / SSIM ────────────────────────────────────────────
-        # Use the non-stop-grad eps_pred for reconstruction.
-        # Restrict to low-noise timesteps (SNR > 1 ≈ t < T/2) to avoid
-        # unbounded gradients ∝ sqrt(1-ᾱ)/sqrt(ᾱ) at high t.
-        x0_pred = (x_t - sqrt_1mab_t * eps_pred) / sqrt_ab_t.clamp(min=1e-8)
-        x0_pred = x0_pred.clamp(-1.0, 1.0)
-
-        snr     = self.alpha_bar[t] / (1.0 - self.alpha_bar[t] + 1e-8)  # (B,)
-        low_idx = (snr > 1.0).nonzero(as_tuple=True)[0]
-
-        if low_idx.numel() > 0:
-            m_low   = mask[low_idx] if mask is not None else None
-            L_mae   = self._mae_loss (x0_pred[low_idx], x0[low_idx], m_low)
-            L_ssim  = self._ssim_loss(x0_pred[low_idx], x0[low_idx], m_low)
-        else:
-            L_mae  = x0_pred.new_zeros(())
-            L_ssim = x0_pred.new_zeros(())
-
-        total = (L_simple
-                 + self.lambda_vlb  * L_vlb
-                 + self.lambda_mae  * L_mae
-                 + self.lambda_ssim * L_ssim)
-
+        model_mean, _, _ = self.q_posterior_mean_variance(
+            x_start=pred_xstart, x_t=x, t=t
+        )
         return {
-            "simple": L_simple,
-            "vlb":    L_vlb,
-            "mae":    L_mae,
-            "ssim":   L_ssim,
-            "total":  total,
+            "mean":        model_mean,
+            "variance":    model_variance,
+            "log_variance": model_log_variance,
+            "pred_xstart": pred_xstart,
         }
 
-    # ── DDIM inference ────────────────────────────────────────────────────────
+    def _predict_xstart_from_eps(self, x_t: th.Tensor, t: th.Tensor, eps: th.Tensor) -> th.Tensor:
+        return (
+            _extract_into_tensor(self.sqrt_recip_alphas_cumprod, t, x_t.shape) * x_t
+            - _extract_into_tensor(self.sqrt_recipm1_alphas_cumprod, t, x_t.shape) * eps
+        )
 
-    @torch.no_grad()
-    def ddim_sample(
+    def _vb_terms_bpd(
         self,
-        mr:          torch.Tensor,           # (B, 1, D, H, W)
-        anatomy_idx: Optional[torch.Tensor] = None,
-        steps:       int   = 20,
-        eta:         float = 0.0,            # 0 = deterministic DDIM
-    ) -> torch.Tensor:                       # (B, 1, D, H, W)
-        B, _, D, H, W = mr.shape
-        device        = mr.device
+        model,
+        x_start:  th.Tensor,
+        x_t:      th.Tensor,
+        t:        th.Tensor,
+        condition: th.Tensor,
+        clip_denoised: bool = True,
+    ) -> dict:
+        true_mean, _, true_log_var = self.q_posterior_mean_variance(
+            x_start=x_start, x_t=x_t, t=t
+        )
+        out = self.p_mean_variance(model, x_t, t, condition, clip_denoised=clip_denoised)
+        kl  = normal_kl(true_mean, true_log_var, out["mean"], out["log_variance"])
+        kl  = mean_flat(kl) / np.log(2.0)
 
-        # Evenly spaced timestep sequence (T-1 → 0)
-        t_seq      = torch.linspace(self.T - 1, 0, steps, dtype=torch.long, device=device)
-        t_prev_seq = torch.cat([t_seq[1:], torch.tensor([-1], device=device)])
+        decoder_nll = -discretized_gaussian_log_likelihood(
+            x_start, means=out["mean"], log_scales=0.5 * out["log_variance"]
+        )
+        decoder_nll = mean_flat(decoder_nll) / np.log(2.0)
 
-        x = torch.randn(B, 1, D, H, W, device=device)
+        output = th.where((t == 0), decoder_nll, kl)
+        return {"output": output, "pred_xstart": out["pred_xstart"]}
 
-        for t_val, t_prev_val in zip(t_seq, t_prev_seq):
-            t_batch = t_val.expand(B)
-            x_in    = torch.cat([mr, x], dim=1)         # (B, 2, D, H, W)
-            out     = self.model(x_in, t_batch, anatomy_idx)
-            eps     = out[:, :1]                         # only epsilon channel
+    def training_losses(
+        self,
+        model:     UNetModel3D,
+        x_start:   th.Tensor,     # (B,1,D,H,W) clean CT in [-1,1]
+        condition: th.Tensor,     # (B,1,D,H,W) MR in [-1,1]
+        t:         th.Tensor,     # (B,) spaced timestep indices
+        penalize_high_variance: bool = True,
+    ) -> dict:
+        noise = th.randn_like(x_start)
+        x_t   = self.q_sample(x_start, t, noise=noise)
 
-            ab_t  = self.alpha_bar[t_val]
-            ab_tp = (self.alpha_bar[t_prev_val]
-                     if t_prev_val >= 0
-                     else torch.ones(1, device=device))
+        x_input      = th.cat([x_t, condition], dim=1)
+        model_output = model(x_input, self._scale_timesteps(t))
 
-            # Predicted x0
-            x0_pred = (x - (1.0 - ab_t).sqrt() * eps) / ab_t.sqrt()
-            x0_pred = x0_pred.clamp(-1.0, 1.0)
+        B, C = x_t.shape[:2]
+        assert model_output.shape == (B, C * 2, *x_t.shape[2:])
+        model_output, model_var_values = th.split(model_output, C, dim=1)
 
-            # Direction pointing to x_t
-            sigma = eta * ((1 - ab_tp) / (1 - ab_t) * (1 - ab_t / ab_tp)).sqrt()
-            dir_  = (1.0 - ab_tp - sigma ** 2).clamp(min=0.0).sqrt() * eps
+        # VLB via frozen mean branch
+        frozen_out = th.cat([model_output.detach(), model_var_values], dim=1)
+        vb = self._vb_terms_bpd(
+            model=lambda *args, r=frozen_out: r,
+            x_start=x_start,
+            x_t=x_t,
+            t=t,
+            condition=condition,
+            clip_denoised=False,
+        )["output"]
+        if self.loss_type == LossType.RESCALED_MSE:
+            vb = vb * (self.num_timesteps / 1000.0)
 
-            noise = sigma * torch.randn_like(x) if eta > 0 else 0.0
-            x     = ab_tp.sqrt() * x0_pred + dir_ + noise
+        # MAE on x_0 prediction
+        target = x_start   # ModelMeanType.START_X
+        mse    = th.nn.L1Loss()(target, model_output)
 
-        return x.clamp(-1.0, 1.0)
+        loss = mse + vb.mean()
+
+        var_reg = 0.0001 * th.mean(model_var_values ** 2)
+        if penalize_high_variance:
+            loss = loss + var_reg
+
+        return {
+            "loss":    loss,
+            "mse":     mse,
+            "vb":      vb.mean(),
+            "var_reg": var_reg,
+        }, target, model_output
+
+    # ── Stochastic DDPM sampling ──────────────────────────────────────────────
+
+    @th.no_grad()
+    def p_sample(
+        self,
+        model:     UNetModel3D,
+        x:         th.Tensor,
+        t:         th.Tensor,
+        condition: th.Tensor,
+        clip_denoised: bool = True,
+    ) -> dict:
+        out = self.p_mean_variance(model, x, t, condition, clip_denoised=clip_denoised)
+        noise        = th.randn_like(x)
+        nonzero_mask = (t != 0).float().view(-1, *([1] * (len(x.shape) - 1)))
+        sample = out["mean"] + nonzero_mask * th.exp(0.5 * out["log_variance"]) * noise
+        return {"sample": sample, "pred_xstart": out["pred_xstart"]}
+
+    @th.no_grad()
+    def p_sample_loop(
+        self,
+        model:     UNetModel3D,
+        shape:     tuple,
+        condition: th.Tensor,
+        clip_denoised: bool  = True,
+        device:    Optional[th.device] = None,
+        progress:  bool = False,
+    ) -> th.Tensor:
+        if device is None:
+            device = next(model.parameters()).device
+        img     = th.randn(*shape, device=device)
+        indices = list(range(self.num_timesteps))[::-1]
+        if progress:
+            from tqdm.auto import tqdm
+            indices = tqdm(indices)
+        for i in indices:
+            t_batch = th.tensor([i] * shape[0], device=device)
+            out  = self.p_sample(model, img, t_batch, condition, clip_denoised)
+            img  = out["sample"]
+        return img
+
+    @th.no_grad()
+    def p_sample_loop_mask(
+        self,
+        model:         UNetModel3D,
+        shape:         tuple,
+        condition:     th.Tensor,
+        mask:          th.Tensor,         # (B,1,D,H,W) body mask
+        clip_denoised: bool  = True,
+        device:        Optional[th.device] = None,
+    ) -> th.Tensor:
+        """Like p_sample_loop but forces background to -1 after every step."""
+        if device is None:
+            device = next(model.parameters()).device
+        img     = th.randn(*shape, device=device)
+        indices = list(range(self.num_timesteps))[::-1]
+        for i in indices:
+            t_batch = th.tensor([i] * shape[0], device=device)
+            out     = self.p_sample(model, img, t_batch, condition, clip_denoised)
+            img     = out["sample"]
+            # background masking: keep only foreground, set background to -1
+            if mask is not None:
+                img = img * mask + (-1.0) * (1 - mask)
+        return img
 
 
-# ── Quick sanity check ─────────────────────────────────────────────────────────
+# ── Beta schedule ───────────────────────────────────────────────────────────────
+
+def get_named_beta_schedule(schedule_name: str, num_diffusion_timesteps: int) -> np.ndarray:
+    if schedule_name == "linear":
+        scale      = 1000 / num_diffusion_timesteps
+        beta_start = scale * 0.0001
+        beta_end   = scale * 0.02
+        return np.linspace(beta_start, beta_end, num_diffusion_timesteps, dtype=np.float64)
+    elif schedule_name == "cosine":
+        betas = []
+        for i in range(num_diffusion_timesteps):
+            t1 = i / num_diffusion_timesteps
+            t2 = (i + 1) / num_diffusion_timesteps
+            a1 = math.cos((t1 + 0.008) / 1.008 * math.pi / 2) ** 2
+            a2 = math.cos((t2 + 0.008) / 1.008 * math.pi / 2) ** 2
+            betas.append(min(1 - a2 / a1, 0.999))
+        return np.array(betas)
+    else:
+        raise NotImplementedError(f"unknown schedule: {schedule_name}")
+
+
+# ── Spaced Diffusion (for Variable-Step training) ──────────────────────────────
+
+def space_timesteps(num_timesteps: int, section_counts) -> set:
+    if isinstance(section_counts, str):
+        if section_counts.startswith("ddim"):
+            desired = int(section_counts[4:])
+            for i in range(1, num_timesteps):
+                if len(range(0, num_timesteps, i)) == desired:
+                    return set(range(0, num_timesteps, i))
+            raise ValueError(f"cannot create exactly {desired} ddim steps")
+        section_counts = [int(x) for x in section_counts.split(",")]
+    size_per = num_timesteps // len(section_counts)
+    extra    = num_timesteps % len(section_counts)
+    start_idx = 0
+    all_steps = []
+    for i, count in enumerate(section_counts):
+        size = size_per + (1 if i < extra else 0)
+        if size < count:
+            raise ValueError(f"cannot divide {size} steps into {count}")
+        frac_stride = 1 if count <= 1 else (size - 1) / (count - 1)
+        cur_idx     = 0.0
+        taken       = []
+        for _ in range(count):
+            taken.append(start_idx + round(cur_idx))
+            cur_idx += frac_stride
+        all_steps += taken
+        start_idx += size
+    return set(all_steps)
+
+
+class SpacedDiffusion(GaussianDiffusion):
+    """
+    GaussianDiffusion that remaps a subset of T timesteps.
+    Used for Variable-Step training (random T ∈ [5,10,...,300] per batch).
+    The wrapped model maps spaced t-indices back to original 1000-step scale.
+    """
+
+    def __init__(self, use_timesteps: set, **kwargs):
+        self.use_timesteps       = set(use_timesteps)
+        self.timestep_map        = []
+        self.original_num_steps  = len(kwargs["betas"])
+
+        base = GaussianDiffusion(**kwargs)
+        last_alpha_cumprod = 1.0
+        new_betas = []
+        for i, alpha_cumprod in enumerate(base.alphas_cumprod):
+            if i in self.use_timesteps:
+                new_betas.append(1 - alpha_cumprod / last_alpha_cumprod)
+                last_alpha_cumprod = alpha_cumprod
+                self.timestep_map.append(i)
+        kwargs["betas"] = np.array(new_betas)
+        super().__init__(**kwargs)
+
+    def _wrap_model(self, model: UNetModel3D) -> "_WrappedModel":
+        if isinstance(model, _WrappedModel):
+            return model
+        return _WrappedModel(
+            model, self.timestep_map,
+            self.rescale_timesteps, self.original_num_steps
+        )
+
+    def p_mean_variance(self, model, *args, **kwargs):
+        return super().p_mean_variance(self._wrap_model(model), *args, **kwargs)
+
+    def training_losses(self, model, *args, **kwargs):
+        return super().training_losses(self._wrap_model(model), *args, **kwargs)
+
+    def _scale_timesteps(self, t: th.Tensor) -> th.Tensor:
+        return t     # wrapping is done in _WrappedModel
+
+
+class _WrappedModel:
+    def __init__(self, model, timestep_map, rescale_timesteps, original_num_steps):
+        self.model              = model
+        self.timestep_map       = timestep_map
+        self.rescale_timesteps  = rescale_timesteps
+        self.original_num_steps = original_num_steps
+
+    def __call__(self, x: th.Tensor, ts: th.Tensor, **kwargs) -> th.Tensor:
+        map_tensor = th.tensor(self.timestep_map, device=ts.device, dtype=ts.dtype)
+        new_ts     = map_tensor[ts]
+        if self.rescale_timesteps:
+            new_ts = new_ts.float() * (1000.0 / self.original_num_steps)
+        return self.model(x, new_ts, **kwargs)
+
+    # Expose parameters() so _checkpoint works correctly
+    def parameters(self):
+        return self.model.parameters()
+
+
+# ── Factory ────────────────────────────────────────────────────────────────────
+
+VARIABLE_T_VALUES = [5, 10, 15, 20, 25, 35, 50, 75, 100, 125, 150, 175, 200, 225, 250, 275, 300]
+
+
+def create_spaced_diffusion(T: int, noise_schedule: str = "linear") -> SpacedDiffusion:
+    """Create a SpacedDiffusion with T evenly-spaced steps from the 1000-step base."""
+    betas = get_named_beta_schedule(noise_schedule, 1000)
+    return SpacedDiffusion(
+        use_timesteps  = space_timesteps(1000, str(T)),
+        betas          = betas,
+        model_mean_type  = ModelMeanType.START_X,
+        model_var_type   = ModelVarType.LEARNED_RANGE,
+        loss_type        = LossType.RESCALED_MSE,
+        rescale_timesteps = True,
+    )
+
+
+def build_model_and_diffusions(
+    model_channels: int   = 64,
+    dropout:        float = 0.2,
+    image_size:     int   = 128,
+    noise_schedule: str   = "linear",
+) -> tuple:
+    """
+    Returns:
+        model       : UNetModel3D
+        diffusions  : dict mapping T → SpacedDiffusion (one per VS-T value)
+    """
+    model = UNetModel3D(
+        in_channels    = 2,
+        out_channels   = 2,
+        model_channels = model_channels,
+        dropout        = dropout,
+        image_size     = image_size,
+    )
+    diffusions = {T: create_spaced_diffusion(T, noise_schedule) for T in VARIABLE_T_VALUES}
+    return model, diffusions
+
+
+# ── Sanity check ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = th.device("cuda" if th.cuda.is_available() else "cpu")
+    model, diffusions = build_model_and_diffusions()
+    model = model.to(device)
+    n_params = sum(p.numel() for p in model.parameters()) / 1e6
+    print(f"UNetModel3D parameters: {n_params:.1f}M")
 
-    unet3d = DDPMUNet3D(
-        in_channels=2, out_channels=2, base_ch=32,
-        time_emb_dim=256, n_anatomy=3,
-    ).to(device)
+    B, D, H, W = 1, 32, 128, 128
+    mr = th.randn(B, 1, D, H, W, device=device)
+    ct = th.randn(B, 1, D, H, W, device=device)
 
-    diffusion3d = GaussianDiffusion3D(unet3d, T=1000).to(device)
+    diff = diffusions[100]
+    t    = th.randint(0, 100, (B,), device=device)
+    with th.cuda.amp.autocast():
+        terms, target, x0_pred = diff.training_losses(model, ct, mr, t)
+    print(f"Loss: {terms['loss'].item():.4f} | MSE: {terms['mse'].item():.4f} | VB: {terms['vb'].item():.4f}")
 
-    B, D, H, W = 2, 32, 128, 128
-    mr   = torch.randn(B, 1, D, H, W, device=device)
-    ct   = torch.randn(B, 1, D, H, W, device=device)
-    t    = torch.randint(0, 1000, (B,), device=device)
-    anat = torch.tensor([0, 2], device=device)
-
-    loss_dict = diffusion3d.p_loss(ct, mr, t, anat)
-    print("Loss dict:", {k: f"{v.item():.4f}" for k, v in loss_dict.items()})
-
-    sample = diffusion3d.ddim_sample(mr, anat, steps=5)
-    print(f"DDIM sample shape: {sample.shape}")
-
-    n_params = sum(p.numel() for p in unet3d.parameters()) / 1e6
-    print(f"DDPMUNet3D params: {n_params:.1f}M")
+    diff50 = diffusions[50]
+    sample = diff50.p_sample_loop(model, (B, 1, D, H, W), mr, device=device)
+    print(f"Sample shape: {sample.shape}, range: [{sample.min():.2f}, {sample.max():.2f}]")

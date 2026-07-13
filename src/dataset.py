@@ -71,6 +71,27 @@ def normalise_mr(arr: np.ndarray, anatomy: str = None,
     return arr
 
 
+def normalise_mr_m11(arr: np.ndarray, anatomy: str = None,
+                     mask: np.ndarray = None) -> np.ndarray:
+    """
+    Per-case normalisation → [-1, 1] for DDPM models.
+
+    Percentile-clip (0.1/99.9) → z-score → clamp ±3σ → scale to [-1, 1].
+    Matches the Faking_it MR preprocessing.
+    """
+    fg = arr[mask.astype(bool)] if mask is not None else arr[arr > 0]
+    if fg.size == 0:
+        return np.full_like(arr, -1.0)
+    p_lo, p_hi = float(np.percentile(fg, 0.1)), float(np.percentile(fg, 99.9))
+    arr  = np.clip(arr, p_lo, p_hi)
+    mean = float(arr[mask.astype(bool)].mean() if mask is not None else arr.mean())
+    std  = float(arr[mask.astype(bool)].std()  if mask is not None else arr.std()) + 1e-8
+    arr  = (arr - mean) / std          # z-score
+    arr  = np.clip(arr, -3.0, 3.0)    # ±3σ
+    arr  = arr / 3.0                   # → [-1, 1]
+    return arr
+
+
 def normalise_ct(arr: np.ndarray, mask: np.ndarray = None) -> np.ndarray:
     """Clip HU range, scale to [-1, 1], and zero-out background to -1024 HU."""
     lo, hi = CT_CLIP
@@ -396,7 +417,7 @@ class SynthRAD3DDataset(Dataset):
                    else np.ones_like(mr_arr)
         mask_bool = (mask_raw > 0)
 
-        mr_arr   = normalise_mr(mr_arr, anatomy, mask=mask_bool)
+        mr_arr   = normalise_mr_m11(mr_arr, anatomy, mask=mask_bool)
         ct_arr   = normalise_ct(ct_arr, mask=mask_bool)
         mask_arr = mask_bool.astype(np.float32)
 
@@ -447,11 +468,11 @@ class SynthRAD3DDataset(Dataset):
                 mr   = mr  [:, ::-1, :].copy()
                 ct   = ct  [:, ::-1, :].copy()
                 mask = mask[:, ::-1, :].copy()
-            # MR intensity jitter (CT HU must be preserved)
+            # MR intensity jitter (CT HU must be preserved); MR now in [-1,1]
             if random.random() < 0.5:
                 factor = random.uniform(0.85, 1.15)
                 shift  = random.uniform(-0.05, 0.05)
-                mr     = np.clip(mr * factor + shift, 0.0, 1.0)
+                mr     = np.clip(mr * factor + shift, -1.0, 1.0)
 
         return {
             "mr":          torch.from_numpy(mr[None].copy()),
