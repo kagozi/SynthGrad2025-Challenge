@@ -1,0 +1,45 @@
+experiment:
+  name: "cwdm_3d"
+  fold: 0
+  seed: 42
+
+data:
+  data_dirs:
+    - "/pvc/data/synthRAD2025_Task1_Train/Task1"
+    - "/pvc/data/synthRAD2025_Task1_Train_D/Task1"
+  folds_csv: "/pvc/data/splits/folds.csv"
+  patch_size: [32, 128, 128]   # D×H×W — must be multiples of 16 for 4× DWT
+  samples_per_volume: 1
+  num_workers: 4
+  pin_memory: false
+
+model:
+  model_channels: 64           # same as VS-DDPM for fair comparison
+  image_size: 128              # H dimension; attention added at H-dim 16 & 8
+  dropout: 0.2
+
+diffusion:
+  noise_schedule: "linear"
+
+training:
+  epochs: 3000
+  batch_size: 2
+  val_every_n_epochs: 50
+  save_every_n_epochs: 100
+  val_ddim_steps: 50
+  n_val_cases: 5
+
+optimizer:
+  name: "adamw"
+  lr: 1.0e-4
+  weight_decay: 1.0e-5
+  betas: [0.9, 0.999]
+
+scheduler:
+  name: "cosine"
+  T_max: 3000
+  eta_min: 1.0e-6
+
+output:
+  checkpoint_dir: "/pvc/checkpoints/cwdm_3d"
+  save_best: true
