@@ -66,19 +66,28 @@ class WavDown3D(nn.Module):
 
 
 class WavUp3D(nn.Module):
-    """3D Haar IDWT upsample.
+    """3D Haar IDWT upsample with optional HF channel projection.
 
-    forward(x, hf_bands) → reconstructed tensor (B, C, D*2, H*2, W*2)
-      x:        LLL subband
-      hf_bands: list of 7 HF tensors from the matching WavDown3D
+    The encoder stores HF subbands with enc_ch channels, but the decoder feature
+    at the matching spatial scale may have dec_ch channels (different when the
+    encoder/decoder cross a channel-multiplier boundary, e.g. 128→256).
+    A learned 1×1 conv projects the 7 HF subbands when enc_ch ≠ dec_ch.
+
+    forward(x, hf_bands) → reconstructed tensor (B, dec_ch, D*2, H*2, W*2)
+      x:        LLL from decoder, shape (B, dec_ch, D2, H2, W2)
+      hf_bands: list of 7 HF tensors from the matching WavDown3D, each (B, enc_ch, …)
     """
 
-    def __init__(self):
+    def __init__(self, enc_ch: int, dec_ch: int):
         super().__init__()
         self.register_buffer("kernels", _haar_kernels())   # (8,1,2,2,2) float32
+        self.hf_proj = (
+            conv_nd(3, enc_ch, dec_ch, 1) if enc_ch != dec_ch else nn.Identity()
+        )
 
     def forward(self, x: th.Tensor, hf_bands: List[th.Tensor]) -> th.Tensor:
-        subbands = [x] + list(hf_bands)                   # 8 × (B,C,D2,H2,W2)
+        hf = [self.hf_proj(sb) for sb in hf_bands]        # project to dec_ch
+        subbands = [x] + hf                               # 8 × (B, dec_ch, D2, H2, W2)
         B, C, D2, H2, W2 = subbands[0].shape
         k = self.kernels.to(subbands[0].dtype)
         result: th.Tensor | None = None
@@ -139,6 +148,7 @@ class WavUNetModel3D(nn.Module):
             TimestepEmbedSequential(conv_nd(dims, in_channels, ch, 3, padding=1))
         ])
         input_block_chans = [ch]
+        enc_wav_channels: list = []   # channel count at each WavDown3D (for WavUp3D projection)
 
         for level, mult in enumerate(ch_mult):
             for _ in range(n_res):
@@ -154,6 +164,7 @@ class WavUNetModel3D(nn.Module):
                 input_block_chans.append(ch)
 
             if level != len(ch_mult) - 1:
+                enc_wav_channels.append(ch)   # record enc_ch before wavelet down
                 self.input_blocks.append(WavDown3D())
                 input_block_chans.append(ch)
                 ds //= 2
@@ -166,7 +177,8 @@ class WavUNetModel3D(nn.Module):
         )
 
         # ── Decoder ───────────────────────────────────────────────────────────
-        # Layout per level: [n_res+1 × TimestepEmbedSequential] then optional WavUp3D
+        # Layout per level: [n_res+1 × TimestepEmbedSequential] then optional WavUp3D.
+        # WavUp3D must project HF subbands from enc_ch → dec_ch when they differ.
         self.output_blocks = nn.ModuleList([])
         for level, mult in list(enumerate(ch_mult))[::-1]:
             for i in range(n_res + 1):
@@ -181,8 +193,9 @@ class WavUNetModel3D(nn.Module):
                     layers.append(AttentionBlock(ch, num_heads=4))
                 self.output_blocks.append(TimestepEmbedSequential(*layers))
 
-            if level:                      # not the top level → wavelet upsample
-                self.output_blocks.append(WavUp3D())
+            if level:
+                enc_ch = enc_wav_channels.pop()   # reverse order matches decoder
+                self.output_blocks.append(WavUp3D(enc_ch=enc_ch, dec_ch=ch))
                 ds *= 2
 
         self.out = nn.Sequential(
